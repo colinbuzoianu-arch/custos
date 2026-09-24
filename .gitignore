@@ -1,0 +1,6 @@
+/target
+/data
+config/custos.toml
+*.jsonl
+.env
+.DS_Store

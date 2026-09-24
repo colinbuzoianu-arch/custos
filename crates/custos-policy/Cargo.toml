@@ -1,0 +1,18 @@
+[package]
+name = "custos-policy"
+description = "Cedar-based authorization for agent tool calls."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+custos-core.workspace = true
+cedar-policy.workspace = true
+thiserror.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

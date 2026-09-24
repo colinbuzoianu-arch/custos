@@ -1,0 +1,19 @@
+# Copy to config/custos.toml (git-ignored) and adjust.
+
+listen = "127.0.0.1:8787"
+
+# The MCP server Custos protects (streamable HTTP endpoint).
+upstream = "http://127.0.0.1:3001/mcp"
+
+# Optional credential Custos sends upstream. Agents never see it.
+# upstream_authorization = "Bearer <upstream-token>"
+
+policy_dir = "policies"
+audit_log = "data/audit.jsonl"
+
+# One entry per agent. Create the hash with:
+#   cargo run -p custos-gateway -- hash-token <the-agent-token>
+[[agents]]
+id = "invoice-processor"
+owner = "finance-lead"
+token_sha256 = "REPLACE_WITH_HASH"

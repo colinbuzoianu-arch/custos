@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Run gateway",
+      "cargo": { "args": ["build", "-p", "custos-gateway", "--bin", "custos"] },
+      "args": ["run", "--config", "config/custos.toml"],
+      "cwd": "${workspaceFolder}",
+      "env": { "RUST_LOG": "debug" }
+    }
+  ]
+}
