@@ -23,11 +23,11 @@ Work top to bottom. In Claude Code, `/next` picks up the first open box.
 - [ ] Ask Claude Code `/explain crates/custos-gateway/src/lib.rs` and read the request path once end to end
 
 ### Session 2 — first real agent through Custos
-- [ ] Run a real MCP server locally (e.g. the MCP reference "everything" server in streamable-HTTP mode)
-- [ ] Copy `config/custos.example.toml` to `config/custos.toml`, point `upstream` at it, create a token with `hash-token`
+- [x] Run a real MCP server locally (e.g. the MCP reference "everything" server in streamable-HTTP mode)
+- [x] Copy `config/custos.example.toml` to `config/custos.toml`, point `upstream` at it, create a token with `hash-token`
 - [ ] Connect Claude Code (or Claude Desktop) to `http://127.0.0.1:8787/mcp` with the agent token as a header
-- [ ] Watch allowed and blocked calls in the log; run `verify-audit`
-- [ ] Write `docs/DEMO.md` with the exact steps (becomes the README quick-start)
+- [x] Watch allowed and blocked calls in the log; run `verify-audit`
+- [x] Write `docs/DEMO.md` with the exact steps (becomes the README quick-start)
 
 ### Session 3 — agents only see what they may use
 - [ ] Filter `tools/list` responses: remove tools the agent's policy would block
