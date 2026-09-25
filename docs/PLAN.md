@@ -17,9 +17,9 @@ Work top to bottom. In Claude Code, `/next` picks up the first open box.
 
 ### Session 1 — set up and understand
 - [ ] Install rustup, VS Code, extensions from `.vscode/extensions.json`, Claude Code
-- [ ] `cargo test --workspace` passes locally
-- [ ] Create a private GitHub repo, push, check the CI workflow goes green
-- [ ] Add the Apache-2.0 `LICENSE` file (GitHub's "Add file → license template")
+- [x] `cargo test --workspace` passes locally
+- [x] Create a private GitHub repo, push, check the CI workflow goes green
+- [x] Add the Apache-2.0 `LICENSE` file (GitHub's "Add file → license template")
 - [ ] Ask Claude Code `/explain crates/custos-gateway/src/lib.rs` and read the request path once end to end
 
 ### Session 2 — first real agent through Custos
