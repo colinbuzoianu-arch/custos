@@ -17,7 +17,7 @@ use axum::{
 };
 use custos_audit::AuditLog;
 use custos_core::{AgentId, Decision, ToolCall};
-use custos_policy::PolicyEngine;
+use custos_policy::PolicyStore;
 use futures_util::{Stream, StreamExt, TryStreamExt, stream::unfold};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -40,7 +40,7 @@ const FORWARD_REQUEST_HEADERS: &[&str] = &[
 const FORWARD_RESPONSE_HEADERS: &[&str] = &["content-type", "mcp-session-id", "cache-control"];
 
 pub struct AppState {
-    pub policy: PolicyEngine,
+    pub policy: PolicyStore,
     pub audit: Mutex<AuditLog>,
     /// sha256(token) hex → agent
     pub agents: HashMap<String, AgentId>,
@@ -54,7 +54,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn from_config(cfg: &config::Config) -> anyhow::Result<Self> {
-        let policy = PolicyEngine::from_dir(&cfg.policy_dir)?;
+        let policy = PolicyStore::open(cfg.policy_dir.clone())?;
         let args_policy = cfg.args_policy()?;
         let audit = AuditLog::open(&cfg.audit_log, args_policy, cfg.gateway_instance())?;
         let agents = cfg
@@ -88,6 +88,75 @@ pub fn app(state: Arc<AppState>) -> Router {
 
 pub fn hash_token(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+fn log_reload_result(result: Result<(String, String), custos_policy::PolicyError>) {
+    match result {
+        Ok((old, new)) => {
+            tracing::info!(old_version = %old, new_version = %new, "policy reloaded");
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "policy reload failed; keeping the previous policy");
+        }
+    }
+}
+
+/// Starts every way the policy set can be reloaded without restarting the
+/// gateway. On Unix, `SIGHUP` always triggers a reload. If `watch_policies`
+/// is set, a debounced (~500ms) file watcher on the policy directory also
+/// triggers one, on any platform. Both call the same `PolicyStore::reload`,
+/// so both share its all-or-nothing, never-fall-back-to-no-policy guarantee.
+///
+/// The returned guard must be kept alive (bound to a variable, not
+/// dropped) for as long as the file watcher should keep running; dropping it
+/// stops the watch. `None` if `watch_policies` was false.
+pub fn spawn_policy_reload_triggers(
+    state: Arc<AppState>,
+    watch_policies: bool,
+) -> anyhow::Result<
+    Option<notify_debouncer_mini::Debouncer<notify_debouncer_mini::notify::RecommendedWatcher>>,
+> {
+    #[cfg(unix)]
+    {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut sig = match signal(SignalKind::hangup()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, "could not install SIGHUP handler");
+                    return;
+                }
+            };
+            loop {
+                sig.recv().await;
+                tracing::info!("SIGHUP received; reloading policy");
+                log_reload_result(state.policy.reload());
+            }
+        });
+    }
+
+    if !watch_policies {
+        return Ok(None);
+    }
+
+    let watch_state = Arc::clone(&state);
+    let mut debouncer = notify_debouncer_mini::new_debouncer(
+        std::time::Duration::from_millis(500),
+        move |result: notify_debouncer_mini::DebounceEventResult| match result {
+            Ok(events) if events.is_empty() => {}
+            Ok(_) => {
+                tracing::info!("policy directory changed; reloading policy");
+                log_reload_result(watch_state.policy.reload());
+            }
+            Err(e) => tracing::warn!(error = %e, "policy directory watch error"),
+        },
+    )?;
+    debouncer.watcher().watch(
+        state.policy.dir(),
+        notify_debouncer_mini::notify::RecursiveMode::NonRecursive,
+    )?;
+    Ok(Some(debouncer))
 }
 
 fn authenticate(state: &AppState, headers: &HeaderMap) -> Option<AgentId> {
@@ -167,7 +236,12 @@ async fn check_tool_call(state: &Arc<AppState>, agent: &AgentId, msg: &Value) ->
             .cloned()
             .unwrap_or(Value::Null),
     };
-    let decision = state.policy.decide(&call);
+    // One snapshot for the whole call: the decision and the audit record's
+    // policy_version both come from it, so this request is decided by (and
+    // says it was decided by) the exact policy that was live when it
+    // started, even if a reload replaces it before the write below finishes.
+    let policy = state.policy.snapshot();
+    let decision = policy.engine.decide(&call);
 
     // Record before acting. The write (and its fsync) run on a blocking
     // thread so they never stall the async reactor, but this still waits
@@ -177,9 +251,15 @@ async fn check_tool_call(state: &Arc<AppState>, agent: &AgentId, msg: &Value) ->
     let write_call = call.clone();
     let write_decision = decision.clone();
     let owner = state.owners.get(agent).cloned().flatten();
+    let policy_version = policy.version.clone();
     let audited = tokio::task::spawn_blocking(move || match write_state.audit.lock() {
         Ok(mut log) => log
-            .append(&write_call, &write_decision, owner.as_deref())
+            .append(
+                &write_call,
+                &write_decision,
+                owner.as_deref(),
+                &policy_version,
+            )
             .is_ok(),
         Err(_) => false,
     })
@@ -269,6 +349,11 @@ async fn forward(
         .unwrap_or_default()
         .to_ascii_lowercase();
 
+    // One snapshot for the whole response, same reasoning as check_tool_call:
+    // every tool in this one tools/list reply is judged by the same policy,
+    // even if a reload lands while a slow SSE response is still streaming.
+    let policy = state.policy.snapshot();
+
     if content_type.starts_with("application/json") {
         let bytes = match upstream.bytes().await {
             Ok(b) => b,
@@ -277,7 +362,7 @@ async fn forward(
                 return blocked_tools_list(want_id);
             }
         };
-        return match filter_tools_list_json(&bytes, &want_id, &state, &agent) {
+        return match filter_tools_list_json(&bytes, &want_id, &policy.engine, &agent) {
             Ok((filtered, hidden)) => {
                 tracing::info!(agent = %agent, hidden, "tools/list filtered");
                 let mut resp = axum::Json(filtered).into_response();
@@ -292,7 +377,7 @@ async fn forward(
     }
 
     if content_type.starts_with("text/event-stream") {
-        let stream = sse_filter_stream(upstream.bytes_stream(), want_id, state.clone(), agent);
+        let stream = sse_filter_stream(upstream.bytes_stream(), want_id, policy, agent);
         let mut resp = Response::new(Body::from_stream(stream));
         *resp.status_mut() = status;
         *resp.headers_mut() = out;
@@ -316,9 +401,8 @@ fn blocked_tools_list(id: Value) -> Response {
 
 /// True if `agent`'s policy would allow it to call `tool`. Arguments never
 /// affect this (Cedar evaluates with no context), so an empty call is enough.
-fn may_call(state: &AppState, agent: &AgentId, tool: &str) -> bool {
-    state
-        .policy
+fn may_call(engine: &custos_policy::PolicyEngine, agent: &AgentId, tool: &str) -> bool {
+    engine
         .decide(&ToolCall {
             agent: agent.clone(),
             tool: tool.to_string(),
@@ -330,7 +414,11 @@ fn may_call(state: &AppState, agent: &AgentId, tool: &str) -> bool {
 /// Drops every tool from `msg["result"]["tools"]` that `agent` may not call,
 /// including any tool object without a usable `name`. Returns how many were
 /// hidden, or `Err` if `msg` isn't a `tools/list` result we understand.
-fn filter_result_tools(msg: &mut Value, state: &AppState, agent: &AgentId) -> Result<usize, ()> {
+fn filter_result_tools(
+    msg: &mut Value,
+    engine: &custos_policy::PolicyEngine,
+    agent: &AgentId,
+) -> Result<usize, ()> {
     let result = msg.get_mut("result").ok_or(())?;
     let tools = result.get_mut("tools").ok_or(())?;
     let arr = tools.as_array_mut().ok_or(())?;
@@ -338,7 +426,7 @@ fn filter_result_tools(msg: &mut Value, state: &AppState, agent: &AgentId) -> Re
     arr.retain(|tool| {
         tool.get("name")
             .and_then(Value::as_str)
-            .is_some_and(|name| may_call(state, agent, name))
+            .is_some_and(|name| may_call(engine, agent, name))
     });
     Ok(before - arr.len())
 }
@@ -350,7 +438,7 @@ fn filter_result_tools(msg: &mut Value, state: &AppState, agent: &AgentId) -> Re
 fn filter_tools_list_json(
     bytes: &[u8],
     want_id: &Value,
-    state: &AppState,
+    engine: &custos_policy::PolicyEngine,
     agent: &AgentId,
 ) -> Result<(Value, usize), ()> {
     let mut msg: Value = serde_json::from_slice(bytes).map_err(|_| ())?;
@@ -362,7 +450,7 @@ fn filter_tools_list_json(
     if msg.get("error").is_some() {
         return Ok((msg, 0));
     }
-    let hidden = filter_result_tools(&mut msg, state, agent)?;
+    let hidden = filter_result_tools(&mut msg, engine, agent)?;
     Ok((msg, hidden))
 }
 
@@ -393,7 +481,7 @@ fn process_sse_event(
     content: &[u8],
     terminator: &[u8],
     want_id: &Value,
-    state: &AppState,
+    engine: &custos_policy::PolicyEngine,
     agent: &AgentId,
 ) -> (Vec<u8>, Option<usize>) {
     let unchanged = || {
@@ -421,7 +509,7 @@ fn process_sse_event(
         return (unchanged(), None);
     }
 
-    let (new_data, hidden) = match filter_result_tools(&mut msg, state, agent) {
+    let (new_data, hidden) = match filter_result_tools(&mut msg, engine, agent) {
         Ok(hidden) => (serde_json::to_string(&msg).unwrap_or_default(), hidden),
         Err(()) => (blocked_tools_list_data(want_id), 0),
     };
@@ -461,7 +549,7 @@ struct SseFilterState {
     buf: Vec<u8>,
     upstream_done: bool,
     want_id: Value,
-    state: Arc<AppState>,
+    policy: Arc<custos_policy::Versioned>,
     agent: AgentId,
     logged: bool,
 }
@@ -474,7 +562,7 @@ struct SseFilterState {
 fn sse_filter_stream(
     inner: impl Stream<Item = reqwest::Result<Bytes>> + Send + 'static,
     want_id: Value,
-    state: Arc<AppState>,
+    policy: Arc<custos_policy::Versioned>,
     agent: AgentId,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> {
     let init = SseFilterState {
@@ -482,7 +570,7 @@ fn sse_filter_stream(
         buf: Vec::new(),
         upstream_done: false,
         want_id,
-        state,
+        policy,
         agent,
         logged: false,
     };
@@ -491,8 +579,13 @@ fn sse_filter_stream(
             if let Some((content_len, total_len)) = find_sse_event(&st.buf) {
                 let content = st.buf[..content_len].to_vec();
                 let terminator = st.buf[content_len..total_len].to_vec();
-                let (out, hidden) =
-                    process_sse_event(&content, &terminator, &st.want_id, &st.state, &st.agent);
+                let (out, hidden) = process_sse_event(
+                    &content,
+                    &terminator,
+                    &st.want_id,
+                    &st.policy.engine,
+                    &st.agent,
+                );
                 st.buf.drain(..total_len);
                 if let Some(hidden) = hidden
                     && !st.logged

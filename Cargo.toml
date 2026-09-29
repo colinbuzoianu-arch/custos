@@ -25,6 +25,8 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "str
 futures-util = "0.3"
 cedar-policy = "4"
 miette = "7"
+arc-swap = "1"
+notify-debouncer-mini = "0.7"
 sha2 = "0.10"
 hmac = "0.12"
 hex = "0.4"

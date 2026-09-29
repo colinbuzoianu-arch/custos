@@ -9,12 +9,15 @@
 //! `forbid` matches. Every decision carries the ids of the policies that
 //! decided it, so the audit log can say *why*.
 
+use arc_swap::ArcSwap;
 use cedar_policy::{
     Authorizer, Context, Decision as CedarDecision, Entities, EntityUid, PolicySet, Request,
 };
 use custos_core::{Decision, ToolCall};
-use std::path::Path;
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PolicyError {
@@ -92,6 +95,74 @@ impl PolicyEngine {
                 reason: format!("forbidden by {}", ids.join(", ")),
             },
         })
+    }
+}
+
+/// A [`PolicyEngine`] paired with the identity of the exact source text it
+/// was built from, so the audit log can record *which* policy decided each
+/// call. `version` is the SHA-256 hex of that source text — any change to
+/// the policies, even whitespace, is a different version.
+pub struct Versioned {
+    pub engine: PolicyEngine,
+    pub version: String,
+}
+
+fn load_versioned(dir: &Path) -> Result<Versioned, PolicyError> {
+    let src = concatenated_source(dir)?;
+    let engine = PolicyEngine::parse(&src)?;
+    let version = hex::encode(Sha256::digest(src.as_bytes()));
+    Ok(Versioned { engine, version })
+}
+
+/// Holds the live [`PolicyEngine`] and lets it be replaced — atomically,
+/// without a lock a reader has to wait on — while the gateway keeps running.
+///
+/// Every read goes through [`snapshot`](Self::snapshot), which hands back an
+/// owned `Arc<Versioned>`. That matters for one specific guarantee: a
+/// request that snapshots the policy once at the start keeps using that
+/// exact engine and version for its whole lifetime, even if [`reload`]
+/// replaces what *new* snapshots see while this request is still in flight —
+/// because the `Arc` keeps the old value alive for as long as anyone still
+/// holds a clone of it.
+pub struct PolicyStore {
+    dir: PathBuf,
+    current: ArcSwap<Versioned>,
+}
+
+impl PolicyStore {
+    /// Loads and validates `dir`'s policies once, up front — same failure
+    /// behaviour as `PolicyEngine::from_dir`, just wrapped for reloading.
+    pub fn open(dir: PathBuf) -> Result<Self, PolicyError> {
+        let versioned = load_versioned(&dir)?;
+        Ok(Self {
+            dir,
+            current: ArcSwap::new(Arc::new(versioned)),
+        })
+    }
+
+    /// The policy set and version in effect right now. Cheap and never
+    /// blocks; call it once per request and reuse the result rather than
+    /// calling it again mid-request.
+    pub fn snapshot(&self) -> Arc<Versioned> {
+        self.current.load_full()
+    }
+
+    /// The directory [`reload`](Self::reload) re-reads — e.g. to point a
+    /// file watcher at it.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Loads and fully validates `dir` again. Only on success does it
+    /// replace what [`snapshot`](Self::snapshot) returns for everyone else —
+    /// on failure the old policy set keeps deciding calls, never falling
+    /// back to "no policy." Returns `(old_version, new_version)` on success.
+    pub fn reload(&self) -> Result<(String, String), PolicyError> {
+        let new = load_versioned(&self.dir)?;
+        let old_version = self.current.load().version.clone();
+        let new_version = new.version.clone();
+        self.current.store(Arc::new(new));
+        Ok((old_version, new_version))
     }
 }
 
@@ -377,6 +448,73 @@ mod tests {
         assert!(reports[0].is_valid());
         assert_eq!(reports[0].policy_count, 1);
         assert_eq!(reports[0].missing_id.len(), 1);
+        Ok(())
+    }
+
+    // --- PolicyStore / reload -----------------------------------------
+
+    fn store_in(dir: &tempfile::TempDir) -> PolicyStore {
+        match PolicyStore::open(dir.path().to_path_buf()) {
+            Ok(s) => s,
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    #[test]
+    fn valid_reload_changes_decisions_and_version() -> Result<(), PolicyError> {
+        let dir = tempfile::tempdir().map_err(|e| PolicyError::Io {
+            path: "<tempdir>".into(),
+            source: e,
+        })?;
+        write(
+            &dir,
+            "a.cedar",
+            r#"permit (principal, action, resource == Tool::"echo");"#,
+        );
+        let store = store_in(&dir);
+        let before = store.snapshot();
+        assert!(!before.engine.decide(&call("x", "get-env")).is_allowed());
+
+        write(
+            &dir,
+            "a.cedar",
+            r#"permit (principal, action, resource == Tool::"get-env");"#,
+        );
+        let (old_version, new_version) = store.reload()?;
+        assert_eq!(old_version, before.version);
+        assert_ne!(new_version, old_version);
+
+        let after = store.snapshot();
+        assert_eq!(after.version, new_version);
+        assert!(after.engine.decide(&call("x", "get-env")).is_allowed());
+
+        // The snapshot taken before the reload still decides exactly as it
+        // did when it was taken — an in-flight request isn't affected by a
+        // reload that happens after it already started.
+        assert!(!before.engine.decide(&call("x", "get-env")).is_allowed());
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_reload_keeps_the_old_policy_and_version() -> Result<(), PolicyError> {
+        let dir = tempfile::tempdir().map_err(|e| PolicyError::Io {
+            path: "<tempdir>".into(),
+            source: e,
+        })?;
+        write(
+            &dir,
+            "a.cedar",
+            r#"permit (principal, action, resource == Tool::"echo");"#,
+        );
+        let store = store_in(&dir);
+        let before = store.snapshot();
+
+        write(&dir, "a.cedar", "this is not cedar at all");
+        assert!(store.reload().is_err());
+
+        let after = store.snapshot();
+        assert_eq!(after.version, before.version);
+        assert!(after.engine.decide(&call("x", "echo")).is_allowed());
         Ok(())
     }
 }

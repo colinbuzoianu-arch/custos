@@ -23,6 +23,7 @@ struct Harness {
     base: String,
     upstream_hits: Arc<AtomicUsize>,
     audit: std::path::PathBuf,
+    state: Arc<AppState>,
     _dir: tempfile::TempDir,
 }
 
@@ -66,12 +67,14 @@ async fn start_with_upstream(
     let state = Arc::new(AppState::from_config(&cfg)?);
     let gw = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let gw_addr = gw.local_addr()?;
-    tokio::spawn(async move { axum::serve(gw, app(state)).await });
+    let serve_state = state.clone();
+    tokio::spawn(async move { axum::serve(gw, app(serve_state)).await });
 
     Ok(Harness {
         base: format!("http://{gw_addr}/mcp"),
         upstream_hits,
         audit,
+        state,
         _dir: dir,
     })
 }
@@ -232,6 +235,40 @@ async fn hash_mode_without_key_id_fails_to_start() -> anyhow::Result<()> {
         agents: vec![],
     };
     assert!(AppState::from_config(&cfg).is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn reload_changes_the_policy_version_on_the_next_audit_record() -> anyhow::Result<()> {
+    let h = start().await?;
+
+    post_json(&h, Some(TOKEN), &tool_call(1, "sap.read_invoice")).await?;
+
+    // Rewrite the policy the harness started with, then reload directly —
+    // the same call SIGHUP and --watch-policies both make; this just skips
+    // waiting on an OS signal or a filesystem debounce to prove it.
+    let policy_dir = h.state.policy.dir().to_path_buf();
+    std::fs::write(
+        policy_dir.join("test.cedar"),
+        r#"@id("no-invoices") forbid (principal, action, resource == Tool::"sap.read_invoice");"#,
+    )?;
+    let (old_version, new_version) = h.state.policy.reload()?;
+    assert_ne!(old_version, new_version);
+
+    // Same tool, now forbidden by the reloaded policy.
+    let r: Value = post_json(&h, Some(TOKEN), &tool_call(2, "sap.read_invoice"))
+        .await?
+        .json()
+        .await?;
+    assert_eq!(r["error"]["code"], BLOCKED_CODE);
+
+    let records: Vec<Value> = std::fs::read_to_string(&h.audit)?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["policy_version"], old_version);
+    assert_eq!(records[1]["policy_version"], new_version);
     Ok(())
 }
 

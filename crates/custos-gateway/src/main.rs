@@ -16,6 +16,11 @@ enum Cmd {
     Run {
         #[arg(short, long, default_value = "config/custos.toml")]
         config: PathBuf,
+        /// Also reload the policy set whenever a file under `policy_dir`
+        /// changes (debounced ~500ms). SIGHUP always reloads on Unix,
+        /// with or without this flag.
+        #[arg(long)]
+        watch_policies: bool,
     },
     /// Print the SHA-256 of an agent token, for the config file.
     HashToken { token: String },
@@ -36,11 +41,18 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match Cli::parse().cmd {
-        Cmd::Run { config } => {
+        Cmd::Run {
+            config,
+            watch_policies,
+        } => {
             let cfg = Config::load(&config)?;
             let state = Arc::new(AppState::from_config(&cfg)?);
+            // Held for the process lifetime: dropping it would stop the file
+            // watcher. `None` when --watch-policies wasn't given.
+            let _policy_watcher =
+                custos_gateway::spawn_policy_reload_triggers(state.clone(), watch_policies)?;
             let listener = tokio::net::TcpListener::bind(cfg.listen).await?;
-            tracing::info!(listen = %cfg.listen, upstream = %cfg.upstream, agents = cfg.agents.len(), "custos gateway started");
+            tracing::info!(listen = %cfg.listen, upstream = %cfg.upstream, agents = cfg.agents.len(), watch_policies, "custos gateway started");
             axum::serve(listener, app(state)).await?;
         }
         Cmd::HashToken { token } => println!("{}", hash_token(&token)),
