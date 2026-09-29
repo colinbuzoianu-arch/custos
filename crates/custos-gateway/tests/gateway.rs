@@ -1,6 +1,6 @@
 //! End-to-end: a fake upstream MCP server, the real gateway, a real HTTP client.
 
-use axum::{Json, Router, routing::post};
+use axum::{Json, Router, http::HeaderValue, response::Response, routing::post};
 use custos_gateway::{AppState, BLOCKED_CODE, app, config, hash_token};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -26,20 +26,13 @@ struct Harness {
     _dir: tempfile::TempDir,
 }
 
-async fn start() -> anyhow::Result<Harness> {
-    // Fake upstream: counts hits, echoes the method back as a result.
-    let hits = Arc::new(AtomicUsize::new(0));
-    let h = hits.clone();
-    let upstream = Router::new().route(
-        "/mcp",
-        post(move |Json(msg): Json<Value>| {
-            let h = h.clone();
-            async move {
-                h.fetch_add(1, Ordering::SeqCst);
-                Json(json!({"jsonrpc": "2.0", "id": msg["id"], "result": {"echo": msg["method"]}}))
-            }
-        }),
-    );
+/// Like `start()`, but the caller supplies the upstream router directly —
+/// used by the `tools/list` filtering tests, which need to control exactly
+/// what upstream sends back (a specific content-type, a specific body).
+async fn start_with_upstream(
+    upstream: Router,
+    upstream_hits: Arc<AtomicUsize>,
+) -> anyhow::Result<Harness> {
     let up = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let up_addr = up.local_addr()?;
     tokio::spawn(async move { axum::serve(up, upstream).await });
@@ -69,10 +62,27 @@ async fn start() -> anyhow::Result<Harness> {
 
     Ok(Harness {
         base: format!("http://{gw_addr}/mcp"),
-        upstream_hits: hits,
+        upstream_hits,
         audit,
         _dir: dir,
     })
+}
+
+async fn start() -> anyhow::Result<Harness> {
+    // Fake upstream: counts hits, echoes the method back as a result.
+    let hits = Arc::new(AtomicUsize::new(0));
+    let h = hits.clone();
+    let upstream = Router::new().route(
+        "/mcp",
+        post(move |Json(msg): Json<Value>| {
+            let h = h.clone();
+            async move {
+                h.fetch_add(1, Ordering::SeqCst);
+                Json(json!({"jsonrpc": "2.0", "id": msg["id"], "result": {"echo": msg["method"]}}))
+            }
+        }),
+    );
+    start_with_upstream(upstream, hits).await
 }
 
 fn tool_call(id: u64, tool: &str) -> Value {
@@ -175,5 +185,166 @@ async fn every_decision_is_audited_in_an_intact_chain() -> anyhow::Result<()> {
     post_json(&h, Some(TOKEN), &tool_call(3, "sap.execute_payment")).await?;
     let (count, _) = custos_audit::verify(&h.audit)?;
     assert_eq!(count, 3);
+    Ok(())
+}
+
+// --- tools/list filtering -------------------------------------------------
+
+fn tools_list(id: u64) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "method": "tools/list", "params": {}})
+}
+
+/// The three tools every fake `tools/list` fixture below offers: one the
+/// test policy permits, one it explicitly forbids, one it never mentions
+/// (blocked by default deny).
+fn three_tools() -> Value {
+    json!([
+        {"name": "sap.read_invoice", "description": "allowed"},
+        {"name": "payroll.read_salaries", "description": "explicitly forbidden"},
+        {"name": "sap.execute_payment", "description": "unlisted, default-denied"},
+    ])
+}
+
+/// Empty (rather than panicking) if `result.tools` is missing, not an array,
+/// or a tool has no usable name — a mismatch there is a test bug, and an
+/// empty `Vec` fails the `assert_eq!` just as loudly.
+fn tool_names(list_response: &Value) -> Vec<&str> {
+    list_response["result"]["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t["name"].as_str())
+        .collect()
+}
+
+/// Splits a raw SSE body into each event's parsed `data:` JSON, in order.
+/// An event whose data isn't valid JSON is dropped rather than panicking.
+fn sse_data_values(raw: &str) -> Vec<Value> {
+    raw.split("\n\n")
+        .filter(|event| !event.trim().is_empty())
+        .filter_map(|event| event.lines().find_map(|l| l.strip_prefix("data:")))
+        .filter_map(|d| serde_json::from_str(d.trim()).ok())
+        .collect()
+}
+
+/// A fixed 200 response with a given content-type — used by the fake
+/// upstreams below to hand back exactly the bytes a test wants to see
+/// filtered (or not) by Custos.
+fn fixed_response(content_type: &'static str, body: impl Into<axum::body::Body>) -> Response {
+    let mut resp = Response::new(body.into());
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static(content_type),
+    );
+    resp
+}
+
+#[tokio::test]
+async fn tools_list_json_hides_what_policy_would_block() -> anyhow::Result<()> {
+    let upstream = Router::new().route(
+        "/mcp",
+        post(|Json(msg): Json<Value>| async move {
+            Json(json!({"jsonrpc": "2.0", "id": msg["id"], "result": {"tools": three_tools()}}))
+        }),
+    );
+    let h = start_with_upstream(upstream, Arc::new(AtomicUsize::new(0))).await?;
+
+    let r: Value = post_json(&h, Some(TOKEN), &tools_list(1))
+        .await?
+        .json()
+        .await?;
+    assert_eq!(tool_names(&r), vec!["sap.read_invoice"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn tools_list_sse_filters_the_response_and_leaves_notifications_alone() -> anyhow::Result<()>
+{
+    let upstream = Router::new().route(
+        "/mcp",
+        post(|Json(msg): Json<Value>| async move {
+            let notification =
+                json!({"jsonrpc": "2.0", "method": "notifications/message", "params": {"data": "working on it"}});
+            let response = json!({"jsonrpc": "2.0", "id": msg["id"], "result": {"tools": three_tools()}});
+            let body = format!(
+                "event: message\ndata: {notification}\n\nevent: message\ndata: {response}\n\n"
+            );
+            fixed_response("text/event-stream", body)
+        }),
+    );
+    let h = start_with_upstream(upstream, Arc::new(AtomicUsize::new(0))).await?;
+
+    let raw = post_json(&h, Some(TOKEN), &tools_list(2))
+        .await?
+        .text()
+        .await?;
+    let events = sse_data_values(&raw);
+    assert_eq!(events.len(), 2);
+
+    // The notification has no "id" at all, so it can never be our response
+    // — it must pass through untouched, byte for byte.
+    assert_eq!(events[0]["method"], "notifications/message");
+    assert_eq!(events[0]["params"]["data"], "working on it");
+
+    assert_eq!(tool_names(&events[1]), vec!["sap.read_invoice"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn tools_list_sse_event_with_different_id_is_not_rewritten() -> anyhow::Result<()> {
+    let upstream = Router::new().route(
+        "/mcp",
+        post(|Json(msg): Json<Value>| async move {
+            // Shaped exactly like a tools/list response, but for a
+            // different in-flight request — must be left alone.
+            let other =
+                json!({"jsonrpc": "2.0", "id": 999_999, "result": {"tools": three_tools()}});
+            let ours =
+                json!({"jsonrpc": "2.0", "id": msg["id"], "result": {"tools": three_tools()}});
+            let body = format!("event: message\ndata: {other}\n\nevent: message\ndata: {ours}\n\n");
+            fixed_response("text/event-stream", body)
+        }),
+    );
+    let h = start_with_upstream(upstream, Arc::new(AtomicUsize::new(0))).await?;
+
+    let raw = post_json(&h, Some(TOKEN), &tools_list(3))
+        .await?
+        .text()
+        .await?;
+    let events = sse_data_values(&raw);
+    assert_eq!(events.len(), 2);
+
+    assert_eq!(events[0]["id"], 999_999);
+    assert_eq!(
+        tool_names(&events[0]),
+        vec![
+            "sap.read_invoice",
+            "payroll.read_salaries",
+            "sap.execute_payment"
+        ]
+    );
+
+    assert_eq!(events[1]["id"], 3);
+    assert_eq!(tool_names(&events[1]), vec!["sap.read_invoice"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn tools_list_unknown_content_type_fails_closed() -> anyhow::Result<()> {
+    let upstream =
+        Router::new().route(
+            "/mcp",
+            post(|| async move {
+                fixed_response("text/plain", "sap.read_invoice, payroll.read_salaries")
+            }),
+        );
+    let h = start_with_upstream(upstream, Arc::new(AtomicUsize::new(0))).await?;
+
+    let r: Value = post_json(&h, Some(TOKEN), &tools_list(4))
+        .await?
+        .json()
+        .await?;
+    assert_eq!(r["id"], 4);
+    assert_eq!(r["error"]["code"], BLOCKED_CODE);
     Ok(())
 }

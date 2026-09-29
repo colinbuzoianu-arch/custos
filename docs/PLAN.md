@@ -30,9 +30,9 @@ Work top to bottom. In Claude Code, `/next` picks up the first open box.
 - [x] Write `docs/DEMO.md` with the exact steps (becomes the README quick-start)
 
 ### Session 3 — agents only see what they may use
-- [ ] Filter `tools/list` responses: remove tools the agent's policy would block
-- [ ] Handle both response types: `application/json` and `text/event-stream` (SSE)
-- [ ] Tests: filtered list, SSE case, unknown content-type fails closed
+- [x] Filter `tools/list` responses: remove tools the agent's policy would block
+- [x] Handle both response types: `application/json` and `text/event-stream` (SSE)
+- [x] Tests: filtered list, SSE case, unknown content-type fails closed
 
 ### Session 4 — audit that respects GDPR
 - [ ] Stop storing raw tool arguments by default: store a SHA-256 of the arguments plus a size
