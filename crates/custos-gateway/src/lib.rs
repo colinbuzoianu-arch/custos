@@ -360,6 +360,7 @@ async fn audit_session_violation(state: &Arc<AppState>, agent: &AgentId, session
                 &write_decision,
                 owner.as_deref(),
                 &policy_version,
+                &custos_inspect::Findings::default(),
             )
             .is_ok(),
         Err(_) => false,
@@ -417,12 +418,16 @@ async fn check_tool_call(state: &Arc<AppState>, agent: &AgentId, msg: &Value) ->
             .cloned()
             .unwrap_or(Value::Null),
     };
+    // Never I/O, never fails: worst case is a truncated (never wrong) scan.
+    let findings =
+        custos_inspect::inspect(&call.arguments, &custos_inspect::InspectConfig::default());
+
     // One snapshot for the whole call: the decision and the audit record's
     // policy_version both come from it, so this request is decided by (and
     // says it was decided by) the exact policy that was live when it
     // started, even if a reload replaces it before the write below finishes.
     let policy = state.policy.snapshot();
-    let decision = policy.engine.decide(&call);
+    let decision = policy.engine.decide(&call, &findings);
 
     // Record before acting. The write (and its fsync) run on a blocking
     // thread so they never stall the async reactor, but this still waits
@@ -431,6 +436,7 @@ async fn check_tool_call(state: &Arc<AppState>, agent: &AgentId, msg: &Value) ->
     let write_state = Arc::clone(state);
     let write_call = call.clone();
     let write_decision = decision.clone();
+    let write_findings = findings.clone();
     let owner = state.owners.get(agent).cloned().flatten();
     let policy_version = policy.version.clone();
     let audited = tokio::task::spawn_blocking(move || match write_state.audit.lock() {
@@ -440,6 +446,7 @@ async fn check_tool_call(state: &Arc<AppState>, agent: &AgentId, msg: &Value) ->
                 &write_decision,
                 owner.as_deref(),
                 &policy_version,
+                &write_findings,
             )
             .is_ok(),
         Err(_) => false,
@@ -583,12 +590,17 @@ fn blocked_tools_list(id: Value) -> Response {
 /// True if `agent`'s policy would allow it to call `tool`. Arguments never
 /// affect this (Cedar evaluates with no context), so an empty call is enough.
 fn may_call(engine: &custos_policy::PolicyEngine, agent: &AgentId, tool: &str) -> bool {
+    // No real arguments to inspect here — this is a visibility check for
+    // tools/list, not a real call — so no findings.
     engine
-        .decide(&ToolCall {
-            agent: agent.clone(),
-            tool: tool.to_string(),
-            arguments: Value::Null,
-        })
+        .decide(
+            &ToolCall {
+                agent: agent.clone(),
+                tool: tool.to_string(),
+                arguments: Value::Null,
+            },
+            &custos_inspect::Findings::default(),
+        )
         .is_allowed()
 }
 

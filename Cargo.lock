@@ -501,6 +501,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "custos-core",
+ "custos-inspect",
  "hex",
  "hmac",
  "serde",
@@ -528,6 +529,7 @@ dependencies = [
  "clap",
  "custos-audit",
  "custos-core",
+ "custos-inspect",
  "custos-policy",
  "futures-util",
  "hex",
@@ -559,12 +561,14 @@ dependencies = [
  "arc-swap",
  "cedar-policy",
  "custos-core",
+ "custos-inspect",
  "hex",
  "miette",
  "serde_json",
  "sha2",
  "tempfile",
  "thiserror",
+ "time",
 ]
 
 [[package]]

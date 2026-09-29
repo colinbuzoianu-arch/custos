@@ -58,16 +58,16 @@ Each session = one branch/commit, `/check` green, `/security-review` before comm
       `sk-`, `ghp_`, `AKIA`, plus high-entropy strings), bulk size (argument bytes, array length).
 - [x] Walk nested JSON; cap depth and total bytes inspected (config) so hostile input can't slow the gateway.
 - [x] Findings contain only kind + count + JSON path, never the matched value.
-- [ ] Record findings in the audit record (kinds and counts only).
+- [x] Record findings in the audit record (kinds and counts only).
 - Tests: valid and invalid checksums for each detector, nested/array input, oversized input
   hits the cap and fails closed, matched values never appear in findings or audit.
 
 ### Session 7 — inspection results in policy
-- [ ] Pass Cedar `context`: `findings` (set of kinds, e.g. `"iban"`), `args_bytes`, `array_max_len`,
+- [x] Pass Cedar `context`: `findings` (set of kinds, e.g. `"iban"`), `args_bytes`, `array_max_len`,
       `hour_utc`, `weekday`.
-- [ ] Add a Cedar schema file (`policies/custos.cedarschema`) and validate policies against it in
+- [x] Add a Cedar schema file (`policies/custos.cedarschema`) and validate policies against it in
       `check-policy` and on reload. Unknown attributes = error.
-- [ ] Example policies: forbid any call whose findings contain `card` or `secret`;
+- [x] Example policies: forbid any call whose findings contain `card` or `secret`;
       forbid `crm.*` exports with `array_max_len > 500`.
 - Tests: same tool allowed without findings and blocked with them; schema catches a typo.
 

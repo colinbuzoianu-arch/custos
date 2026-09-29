@@ -32,10 +32,6 @@ pub enum Kind {
     SteuerId,
     Email,
     ApiKey,
-    /// The whole argument payload is larger than `max_bulk_bytes`.
-    BulkBytes,
-    /// One array is longer than `max_bulk_array_len`.
-    BulkArray,
 }
 
 /// One kind of match at one location. Never carries the matched text —
@@ -57,11 +53,6 @@ pub struct InspectConfig {
     pub max_depth: usize,
     /// Above this many serialized bytes, inspection doesn't run at all.
     pub max_bytes: usize,
-    /// Above this many serialized bytes, a [`Kind::BulkBytes`] finding is
-    /// recorded (but inspection still runs, unlike `max_bytes`).
-    pub max_bulk_bytes: usize,
-    /// Above this many elements, an array gets a [`Kind::BulkArray`] finding.
-    pub max_bulk_array_len: usize,
 }
 
 impl Default for InspectConfig {
@@ -69,8 +60,6 @@ impl Default for InspectConfig {
         Self {
             max_depth: 32,
             max_bytes: 1_000_000,
-            max_bulk_bytes: 100_000,
-            max_bulk_array_len: 500,
         }
     }
 }
@@ -79,10 +68,16 @@ impl Default for InspectConfig {
 /// inspection stopped rather than silently pretending it saw everything,
 /// so a caller can (and should) treat an incomplete scan as itself
 /// suspicious rather than trusting a clean-looking but partial result.
+///
+/// `args_bytes` and `array_max_len` are always computed (not gated by a
+/// threshold): a policy decides what counts as "too big," this just reports
+/// the numbers so it can.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Findings {
     pub items: Vec<Finding>,
     pub args_bytes: usize,
+    /// The longest array found anywhere in the value, or 0 if there are none.
+    pub array_max_len: usize,
     pub truncated: bool,
 }
 
@@ -97,16 +92,9 @@ pub fn inspect(value: &Value, config: &InspectConfig) -> Findings {
     let mut findings = Findings {
         items: Vec::new(),
         args_bytes,
+        array_max_len: 0,
         truncated: false,
     };
-
-    if args_bytes > config.max_bulk_bytes {
-        findings.items.push(Finding {
-            kind: Kind::BulkBytes,
-            path: "$".to_string(),
-            count: args_bytes,
-        });
-    }
 
     if args_bytes > config.max_bytes {
         findings.truncated = true;
@@ -125,13 +113,7 @@ fn walk(value: &Value, path: &str, depth: usize, config: &InspectConfig, out: &m
     match value {
         Value::String(s) => scan_string(s, path, out),
         Value::Array(items) => {
-            if items.len() > config.max_bulk_array_len {
-                out.items.push(Finding {
-                    kind: Kind::BulkArray,
-                    path: path.to_string(),
-                    count: items.len(),
-                });
-            }
+            out.array_max_len = out.array_max_len.max(items.len());
             for (i, v) in items.iter().enumerate() {
                 walk(v, &format!("{path}[{i}]"), depth + 1, config, out);
             }
@@ -552,16 +534,7 @@ mod tests {
         let big = "a".repeat(2_000_000);
         let f = inspect_default(&json!({"blob": big}));
         assert!(f.truncated);
-        // The size caps still fire (that's a real, useful finding), but the
-        // expensive per-character content scan never ran — no detector
-        // besides the size ones got a chance to report anything.
-        let content_kinds: Vec<Kind> = f
-            .items
-            .iter()
-            .map(|i| i.kind)
-            .filter(|k| !matches!(k, Kind::BulkBytes | Kind::BulkArray))
-            .collect();
-        assert!(content_kinds.is_empty(), "{f:?}");
+        assert!(f.items.is_empty(), "{f:?}");
     }
 
     #[test]
@@ -575,19 +548,18 @@ mod tests {
     }
 
     #[test]
-    fn oversized_array_reports_bulk_finding() {
+    fn array_max_len_is_the_longest_array_anywhere() {
         let arr: Vec<Value> = (0..1000).map(|i| json!(i)).collect();
-        let f = inspect_default(&json!({"rows": arr}));
-        let bulk = f.items.iter().find(|i| i.kind == Kind::BulkArray);
-        assert_eq!(bulk.map(|i| i.count), Some(1000));
+        let f = inspect_default(&json!({"rows": arr, "other": [1, 2]}));
+        assert_eq!(f.array_max_len, 1000);
     }
 
     #[test]
-    fn large_payload_reports_bulk_bytes_finding() {
+    fn args_bytes_reflects_payload_size() {
         let big = "a".repeat(200_000);
         let f = inspect_default(&json!({"blob": big}));
         assert!(!f.truncated);
-        assert!(f.items.iter().any(|i| i.kind == Kind::BulkBytes), "{f:?}");
+        assert!(f.args_bytes > 200_000, "{f:?}");
     }
 
     #[test]

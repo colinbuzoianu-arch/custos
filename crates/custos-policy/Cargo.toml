@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 custos-core.workspace = true
+custos-inspect.workspace = true
 cedar-policy.workspace = true
 miette.workspace = true
 thiserror.workspace = true
@@ -14,6 +15,7 @@ serde_json.workspace = true
 sha2.workspace = true
 hex.workspace = true
 arc-swap.workspace = true
+time.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

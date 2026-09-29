@@ -1,0 +1,29 @@
+// Schema for Custos policies. Validated against every *.cedar file in this
+// directory by `custos check-policy` and on every policy (re)load — an
+// unknown context attribute, or one used with the wrong type, is an error
+// here rather than silently doing nothing at decision time.
+//
+// Keep this in sync with crates/custos-policy/src/lib.rs (build_context)
+// and crates/custos-inspect/src/lib.rs (Kind).
+
+entity Agent;
+entity Tool;
+
+action call_tool appliesTo {
+    principal: [Agent],
+    resource: [Tool],
+    context: {
+        // Kinds of sensitive content custos-inspect found in this call's
+        // arguments, e.g. "iban", "card", "cnp", "steuer_id", "email",
+        // "api_key". Never the matched values themselves.
+        findings: Set<String>,
+        // Serialized size of the arguments, in bytes.
+        args_bytes: Long,
+        // The longest array anywhere in the arguments (0 if none).
+        array_max_len: Long,
+        // 0-23, UTC, at decision time.
+        hour_utc: Long,
+        // 0 = Monday .. 6 = Sunday, UTC, at decision time.
+        weekday: Long,
+    }
+};

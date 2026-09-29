@@ -109,6 +109,10 @@ fn tool_call(id: u64, tool: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": tool, "arguments": {}}})
 }
 
+fn tool_call_with_args(id: u64, tool: &str, arguments: Value) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": tool, "arguments": arguments}})
+}
+
 async fn post_json(
     h: &Harness,
     token: Option<&str>,
@@ -205,6 +209,29 @@ async fn every_decision_is_audited_in_an_intact_chain() -> anyhow::Result<()> {
     post_json(&h, Some(TOKEN), &tool_call(3, "sap.execute_payment")).await?;
     let (count, _) = custos_audit::verify(&h.audit)?;
     assert_eq!(count, 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn content_findings_are_recorded_on_the_audit_record() -> anyhow::Result<()> {
+    let h = start().await?;
+    let card = "4242424242424242"; // Stripe's published Luhn-valid test number
+    post_json(
+        &h,
+        Some(TOKEN),
+        &tool_call_with_args(1, "sap.read_invoice", json!({"card": card})),
+    )
+    .await?;
+
+    let records: Vec<Value> = std::fs::read_to_string(&h.audit)?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    assert_eq!(records.len(), 1);
+    let found_card = records[0]["findings"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|f| f["kind"] == "card"));
+    assert!(found_card, "{:?}", records[0]);
     Ok(())
 }
 

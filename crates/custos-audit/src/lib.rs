@@ -3,12 +3,14 @@
 //! Each line of the log is one JSON record. Every record contains the hash of
 //! the previous record, so editing or deleting any line breaks the chain and
 //! [`verify`] reports where. Records written by an older version of this
-//! module — no `"v"` field at all, or `"v": 2` before `policy_version`
-//! existed — are still read and verified with their original, unchanged
-//! hashing rule; every new record is written as `"v": 3`. The ClickHouse sink
-//! and signatures come later (see `docs/PLAN.md`).
+//! module — no `"v"` field at all, `"v": 2` before `policy_version` existed,
+//! or `"v": 3` before `findings` existed — are still read and verified with
+//! their original, unchanged hashing rule; every new record is written as
+//! `"v": 4`. The ClickHouse sink and signatures come later (see
+//! `docs/PLAN.md`).
 
 use custos_core::{AgentId, Decision, ToolCall};
+use custos_inspect::Finding;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -142,7 +144,7 @@ fn represent_arguments(args: &Value, policy: &ArgsPolicy) -> Result<Value, Audit
     }
 }
 
-/// One audit record as written today (`"v": 3`).
+/// One audit record as written today (`"v": 4`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
     pub v: u8,
@@ -160,6 +162,10 @@ pub struct Record {
     /// (see `custos_policy::PolicyStore`) — proves which policy version
     /// decided this specific call.
     pub policy_version: String,
+    /// What `custos_inspect::inspect` found in the arguments: kind, JSON
+    /// path and count only — never the matched values, same guarantee as
+    /// `arguments` itself.
+    pub findings: Vec<Finding>,
     pub prev_hash: String,
     pub hash: String,
 }
@@ -177,10 +183,50 @@ struct Hashed<'a> {
     decision: &'a Decision,
     gateway_instance: &'a str,
     policy_version: &'a str,
+    findings: &'a [Finding],
     prev_hash: &'a str,
 }
 
 fn hash_of(h: &Hashed<'_>) -> Result<String, serde_json::Error> {
+    let bytes = serde_json::to_vec(h)?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+/// A record written before `findings` existed (`"v": 3`). Kept only so
+/// [`verify`] can still walk a chain that includes one of these; never
+/// written any more.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RecordV3 {
+    v: u8,
+    seq: u64,
+    ts: String,
+    agent: AgentId,
+    owner: Option<String>,
+    tool: String,
+    arguments: Value,
+    decision: Decision,
+    gateway_instance: String,
+    policy_version: String,
+    prev_hash: String,
+    hash: String,
+}
+
+#[derive(Serialize)]
+struct HashedV3<'a> {
+    v: u8,
+    seq: u64,
+    ts: &'a str,
+    agent: &'a AgentId,
+    owner: &'a Option<String>,
+    tool: &'a str,
+    arguments: &'a Value,
+    decision: &'a Decision,
+    gateway_instance: &'a str,
+    policy_version: &'a str,
+    prev_hash: &'a str,
+}
+
+fn hash_of_v3(h: &HashedV3<'_>) -> Result<String, serde_json::Error> {
     let bytes = serde_json::to_vec(h)?;
     Ok(hex::encode(Sha256::digest(bytes)))
 }
@@ -294,6 +340,7 @@ impl AuditLog {
         decision: &Decision,
         owner: Option<&str>,
         policy_version: &str,
+        findings: &custos_inspect::Findings,
     ) -> Result<Record, AuditError> {
         let ts = time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)
@@ -301,8 +348,9 @@ impl AuditLog {
         let seq = self.seq + 1;
         let owner = owner.map(str::to_string);
         let arguments = represent_arguments(&call.arguments, &self.args_policy)?;
+        let findings = findings.items.clone();
         let hash = hash_of(&Hashed {
-            v: 3,
+            v: 4,
             seq,
             ts: &ts,
             agent: &call.agent,
@@ -312,6 +360,7 @@ impl AuditLog {
             decision,
             gateway_instance: &self.gateway_instance,
             policy_version,
+            findings: &findings,
             prev_hash: &self.last_hash,
         })
         .map_err(|e| AuditError::Corrupt {
@@ -319,7 +368,7 @@ impl AuditLog {
             msg: e.to_string(),
         })?;
         let record = Record {
-            v: 3,
+            v: 4,
             seq,
             ts,
             agent: call.agent.clone(),
@@ -329,6 +378,7 @@ impl AuditLog {
             decision: decision.clone(),
             gateway_instance: self.gateway_instance.clone(),
             policy_version: policy_version.to_string(),
+            findings,
             prev_hash: self.last_hash.clone(),
             hash: hash.clone(),
         };
@@ -345,7 +395,7 @@ impl AuditLog {
     }
 }
 
-/// Check the whole chain — `v1`, `v2` and `v3` records alike. Returns the
+/// Check the whole chain — `v1` through `v4` records alike. Returns the
 /// last sequence number and hash.
 pub fn verify(path: impl AsRef<Path>) -> Result<(u64, String), AuditError> {
     let reader = BufReader::new(File::open(path)?);
@@ -396,6 +446,24 @@ pub fn verify(path: impl AsRef<Path>) -> Result<(u64, String), AuditError> {
                 (r.seq, r.prev_hash, r.hash, expected)
             }
             Some(3) => {
+                let r: RecordV3 = serde_json::from_value(raw).map_err(corrupt)?;
+                let expected = hash_of_v3(&HashedV3 {
+                    v: r.v,
+                    seq: r.seq,
+                    ts: &r.ts,
+                    agent: &r.agent,
+                    owner: &r.owner,
+                    tool: &r.tool,
+                    arguments: &r.arguments,
+                    decision: &r.decision,
+                    gateway_instance: &r.gateway_instance,
+                    policy_version: &r.policy_version,
+                    prev_hash: &r.prev_hash,
+                })
+                .map_err(corrupt)?;
+                (r.seq, r.prev_hash, r.hash, expected)
+            }
+            Some(4) => {
                 let r: Record = serde_json::from_value(raw).map_err(corrupt)?;
                 let expected = hash_of(&Hashed {
                     v: r.v,
@@ -408,6 +476,7 @@ pub fn verify(path: impl AsRef<Path>) -> Result<(u64, String), AuditError> {
                     decision: &r.decision,
                     gateway_instance: &r.gateway_instance,
                     policy_version: &r.policy_version,
+                    findings: &r.findings,
                     prev_hash: &r.prev_hash,
                 })
                 .map_err(corrupt)?;
@@ -460,6 +529,10 @@ mod tests {
         }
     }
 
+    fn no_findings() -> custos_inspect::Findings {
+        custos_inspect::Findings::default()
+    }
+
     // --- key handling --------------------------------------------------
 
     #[test]
@@ -498,8 +571,8 @@ mod tests {
             "t",
             json!({"amount": 10, "iban": "RO49AAAA1B31007593840000"}),
         );
-        let ra = log.append(&a, &Decision::Allow, None, "policy-v1")?;
-        let rb = log.append(&b, &Decision::Allow, None, "policy-v1")?;
+        let ra = log.append(&a, &Decision::Allow, None, "policy-v1", &no_findings())?;
+        let rb = log.append(&b, &Decision::Allow, None, "policy-v1", &no_findings())?;
         assert_eq!(ra.arguments["args_hmac"], rb.arguments["args_hmac"]);
         Ok(())
     }
@@ -515,12 +588,19 @@ mod tests {
             &Decision::Allow,
             None,
             "policy-v1",
+            &no_findings(),
         )?;
 
         let dir_b = tempfile::tempdir().map_err(AuditError::Io)?;
         let policy_b = ArgsPolicy::hash(KEY_B.to_vec(), "other-key".into())?;
         let (_p2, mut log_b) = log_in(&dir_b, policy_b);
-        let rb = log_b.append(&call("t", args), &Decision::Allow, None, "policy-v1")?;
+        let rb = log_b.append(
+            &call("t", args),
+            &Decision::Allow,
+            None,
+            "policy-v1",
+            &no_findings(),
+        )?;
 
         assert_ne!(ra.arguments["args_hmac"], rb.arguments["args_hmac"]);
         Ok(())
@@ -535,6 +615,7 @@ mod tests {
             &Decision::Allow,
             None,
             "policy-v1",
+            &no_findings(),
         )?;
         let raw = std::fs::read_to_string(&p).map_err(AuditError::Io)?;
         assert!(!raw.contains("RO49AAAA1B31007593840000"));
@@ -553,16 +634,35 @@ mod tests {
             &Decision::Allow,
             None,
             "policy-v1",
+            &no_findings(),
         )?;
         assert_eq!(r.arguments["iban"], "<string:24>");
         assert_eq!(r.arguments["amount"], "<number>");
         Ok(())
     }
 
-    // --- chain integrity, v1/v2 compatibility ---------------------------
+    #[test]
+    fn findings_are_recorded_kinds_and_counts_only() -> Result<(), AuditError> {
+        let dir = tempfile::tempdir().map_err(AuditError::Io)?;
+        let (_p, mut log) = log_in(&dir, ArgsPolicy::Redacted);
+        let value = json!({"iban": "RO49AAAA1B31007593840000"});
+        let findings = custos_inspect::inspect(&value, &custos_inspect::InspectConfig::default());
+        assert!(!findings.items.is_empty(), "fixture must actually match");
+        let r = log.append(
+            &call("t", value),
+            &Decision::Allow,
+            None,
+            "policy-v1",
+            &findings,
+        )?;
+        assert_eq!(r.findings, findings.items);
+        Ok(())
+    }
+
+    // --- chain integrity, v1/v2/v3 compatibility ------------------------
 
     #[test]
-    fn v3_chain_verifies_and_resumes() -> Result<(), AuditError> {
+    fn v4_chain_verifies_and_resumes() -> Result<(), AuditError> {
         let dir = tempfile::tempdir().map_err(AuditError::Io)?;
         let (p, mut log) = log_in(&dir, hash_policy());
         log.append(
@@ -570,10 +670,17 @@ mod tests {
             &Decision::Allow,
             Some("finance"),
             "policy-v1",
+            &no_findings(),
         )?;
         drop(log);
         let mut log = AuditLog::open(&p, hash_policy(), "test-instance".into())?;
-        let r = log.append(&call("y", Value::Null), &Decision::Allow, None, "policy-v2")?;
+        let r = log.append(
+            &call("y", Value::Null),
+            &Decision::Allow,
+            None,
+            "policy-v2",
+            &no_findings(),
+        )?;
         assert_eq!(r.seq, 2);
         assert_eq!(r.policy_version, "policy-v2");
         assert_eq!(verify(&p)?.0, 2);
@@ -589,6 +696,7 @@ mod tests {
             &Decision::Allow,
             None,
             "policy-v1",
+            &no_findings(),
         )?;
         drop(log);
         let text = std::fs::read_to_string(&p).map_err(AuditError::Io)?;
@@ -652,11 +760,17 @@ mod tests {
         let (seq, _) = verify(&p)?;
         assert_eq!(seq, 1);
 
-        // A gateway can still resume (and append v3 records) after it.
+        // A gateway can still resume (and append v4 records) after it.
         let mut log = AuditLog::open(&p, hash_policy(), "test-instance".into())?;
-        let r = log.append(&call("y", Value::Null), &Decision::Allow, None, "policy-v1")?;
+        let r = log.append(
+            &call("y", Value::Null),
+            &Decision::Allow,
+            None,
+            "policy-v1",
+            &no_findings(),
+        )?;
         assert_eq!(r.seq, 2);
-        assert_eq!(r.v, 3);
+        assert_eq!(r.v, 4);
         Ok(())
     }
 
@@ -703,11 +817,76 @@ mod tests {
         let (seq, _) = verify(&p)?;
         assert_eq!(seq, 1);
 
-        // A gateway can still resume (and append v3 records) after it.
+        // A gateway can still resume (and append v4 records) after it.
         let mut log = AuditLog::open(&p, hash_policy(), "test-instance".into())?;
-        let r = log.append(&call("y", Value::Null), &Decision::Allow, None, "policy-v1")?;
+        let r = log.append(
+            &call("y", Value::Null),
+            &Decision::Allow,
+            None,
+            "policy-v1",
+            &no_findings(),
+        )?;
         assert_eq!(r.seq, 2);
-        assert_eq!(r.v, 3);
+        assert_eq!(r.v, 4);
+        Ok(())
+    }
+
+    #[test]
+    fn a_v3_log_still_verifies() -> Result<(), AuditError> {
+        let dir = tempfile::tempdir().map_err(AuditError::Io)?;
+        let p = dir.path().join("audit.jsonl");
+        let v3 = HashedV3 {
+            v: 3,
+            seq: 1,
+            ts: "2026-01-01T00:00:00Z",
+            agent: &AgentId("a".into()),
+            owner: &None,
+            tool: "x",
+            arguments: &Value::Null,
+            decision: &Decision::Allow,
+            gateway_instance: "gw-old",
+            policy_version: "policy-v0",
+            prev_hash: GENESIS,
+        };
+        let hash = hash_of_v3(&v3).map_err(|e| AuditError::Corrupt {
+            line: 1,
+            msg: e.to_string(),
+        })?;
+        let record = RecordV3 {
+            v: 3,
+            seq: 1,
+            ts: "2026-01-01T00:00:00Z".into(),
+            agent: AgentId("a".into()),
+            owner: None,
+            tool: "x".into(),
+            arguments: Value::Null,
+            decision: Decision::Allow,
+            gateway_instance: "gw-old".into(),
+            policy_version: "policy-v0".into(),
+            prev_hash: GENESIS.into(),
+            hash,
+        };
+        let mut line = serde_json::to_vec(&record).map_err(|e| AuditError::Corrupt {
+            line: 1,
+            msg: e.to_string(),
+        })?;
+        line.push(b'\n');
+        std::fs::write(&p, &line).map_err(AuditError::Io)?;
+
+        let (seq, _) = verify(&p)?;
+        assert_eq!(seq, 1);
+
+        // A gateway can still resume (and append v4 records) after it.
+        let mut log = AuditLog::open(&p, hash_policy(), "test-instance".into())?;
+        let r = log.append(
+            &call("y", Value::Null),
+            &Decision::Allow,
+            None,
+            "policy-v1",
+            &no_findings(),
+        )?;
+        assert_eq!(r.seq, 2);
+        assert_eq!(r.v, 4);
         Ok(())
     }
 
@@ -716,7 +895,13 @@ mod tests {
         let dir = tempfile::tempdir().map_err(AuditError::Io)?;
         let (p, mut log) = log_in(&dir, ArgsPolicy::Full);
         for t in ["a", "b", "c"] {
-            log.append(&call(t, Value::Null), &Decision::Allow, None, "policy-v1")?;
+            log.append(
+                &call(t, Value::Null),
+                &Decision::Allow,
+                None,
+                "policy-v1",
+                &no_findings(),
+            )?;
         }
         drop(log);
         let text = std::fs::read_to_string(&p).map_err(AuditError::Io)?;
@@ -740,6 +925,7 @@ mod tests {
             &Decision::Allow,
             None,
             "policy-v1",
+            &no_findings(),
         )?;
         assert_eq!(r.arguments, json!({"amount": 10}));
         Ok(())
