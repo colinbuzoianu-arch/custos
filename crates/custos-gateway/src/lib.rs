@@ -24,6 +24,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// JSON-RPC error code returned when Custos blocks a call.
 pub const BLOCKED_CODE: i64 = -32001;
@@ -39,6 +40,18 @@ const FORWARD_REQUEST_HEADERS: &[&str] = &[
 ];
 const FORWARD_RESPONSE_HEADERS: &[&str] = &["content-type", "mcp-session-id", "cache-control"];
 
+/// A pseudo-tool name used only to audit a session-binding violation — never
+/// a real upstream tool, so it can't collide with one.
+const SESSION_REUSE_TOOL: &str = "custos/session-reuse-attempt";
+
+/// Which agent created an MCP session, and when it was last used — so agent
+/// B can't reuse agent A's session, and idle sessions don't accumulate
+/// forever.
+struct SessionEntry {
+    agent: AgentId,
+    last_seen: Instant,
+}
+
 pub struct AppState {
     pub policy: PolicyStore,
     pub audit: Mutex<AuditLog>,
@@ -47,6 +60,10 @@ pub struct AppState {
     /// agent → human owner, for the audit log. Looked up separately from
     /// `agents` so `authenticate` can keep returning a plain `AgentId`.
     pub owners: HashMap<AgentId, Option<String>>,
+    /// `Mcp-Session-Id` → who created it.
+    sessions: Mutex<HashMap<String, SessionEntry>>,
+    session_idle_timeout: Duration,
+    max_sessions: usize,
     pub upstream: String,
     pub upstream_authorization: Option<String>,
     pub client: reqwest::Client,
@@ -72,6 +89,9 @@ impl AppState {
             audit: Mutex::new(audit),
             agents,
             owners,
+            sessions: Mutex::new(HashMap::new()),
+            session_idle_timeout: Duration::from_secs(cfg.session_idle_timeout_secs),
+            max_sessions: cfg.max_sessions,
             upstream: cfg.upstream.clone(),
             upstream_authorization: cfg.upstream_authorization.clone(),
             client: reqwest::Client::new(),
@@ -159,6 +179,28 @@ pub fn spawn_policy_reload_triggers(
     Ok(Some(debouncer))
 }
 
+/// Periodically forgets MCP sessions nobody has used within
+/// `session_idle_timeout` — otherwise a gateway that runs indefinitely would
+/// accumulate one entry per session forever.
+pub fn spawn_session_expiry_sweep(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(300));
+        loop {
+            tick.tick().await;
+            let Ok(mut sessions) = state.sessions.lock() else {
+                continue;
+            };
+            let before = sessions.len();
+            let timeout = state.session_idle_timeout;
+            sessions.retain(|_, entry| entry.last_seen.elapsed() < timeout);
+            let expired = before - sessions.len();
+            if expired > 0 {
+                tracing::info!(expired, remaining = sessions.len(), "expired idle sessions");
+            }
+        }
+    });
+}
+
 fn authenticate(state: &AppState, headers: &HeaderMap) -> Option<AgentId> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let token = value.strip_prefix("Bearer ")?.trim();
@@ -178,6 +220,10 @@ async fn handle(
     let Some(agent) = authenticate(&state, &headers) else {
         return (StatusCode::UNAUTHORIZED, "missing or unknown agent token").into_response();
     };
+
+    if let Some(blocked) = check_session(&state, &agent, &headers, &method).await {
+        return blocked;
+    }
 
     // Set only for a `tools/list` request: the id whose response, once it
     // comes back from upstream, must be filtered down to what this agent may
@@ -214,7 +260,142 @@ async fn handle(
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
 
-    forward(state, agent, method, &headers, body, tools_list_id).await
+    let resp = forward(
+        state.clone(),
+        agent.clone(),
+        method,
+        &headers,
+        body,
+        tools_list_id,
+    )
+    .await;
+
+    // A response that introduces or confirms an Mcp-Session-Id binds it to
+    // this agent — covers both a brand-new session (from `initialize`) and
+    // refreshing an existing one's last-seen time.
+    if let Some(session_id) = resp
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+    {
+        bind_session(&state, &agent, session_id);
+    }
+
+    resp
+}
+
+/// Checks an incoming `Mcp-Session-Id` against who created it. `None` means
+/// either there's no session id on this request, or it's this agent's own —
+/// either way, proceed to `forward`. `Some(response)` means the request must
+/// never reach upstream: unknown session (404, the client should
+/// re-initialize per the MCP spec) or a session owned by a different agent
+/// (403, audited as a reuse attempt). A `DELETE` on an owned session removes
+/// its binding immediately, before the request is forwarded.
+async fn check_session(
+    state: &Arc<AppState>,
+    agent: &AgentId,
+    headers: &HeaderMap,
+    method: &Method,
+) -> Option<Response> {
+    let session_id = headers
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())?
+        .to_string();
+
+    let owner = match state.sessions.lock() {
+        Ok(sessions) => sessions.get(&session_id).map(|e| e.agent.clone()),
+        Err(_) => {
+            return Some(
+                (StatusCode::SERVICE_UNAVAILABLE, "session table unavailable").into_response(),
+            );
+        }
+    };
+
+    match owner {
+        None => Some((StatusCode::NOT_FOUND, "unknown MCP session").into_response()),
+        Some(owner) if &owner != agent => {
+            audit_session_violation(state, agent, &session_id).await;
+            Some(
+                (
+                    StatusCode::FORBIDDEN,
+                    "session belongs to a different agent",
+                )
+                    .into_response(),
+            )
+        }
+        Some(_) => {
+            if let Ok(mut sessions) = state.sessions.lock() {
+                if *method == Method::DELETE {
+                    sessions.remove(&session_id);
+                } else if let Some(entry) = sessions.get_mut(&session_id) {
+                    entry.last_seen = Instant::now();
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Records a session-reuse attempt in the audit log — the same primitive
+/// `check_tool_call` uses, with a synthetic tool name so it's never mistaken
+/// for a real upstream tool.
+async fn audit_session_violation(state: &Arc<AppState>, agent: &AgentId, session_id: &str) {
+    let policy_version = state.policy.snapshot().version.clone();
+    let call = ToolCall {
+        agent: agent.clone(),
+        tool: SESSION_REUSE_TOOL.to_string(),
+        arguments: json!({ "session_id": session_id }),
+    };
+    let decision = Decision::Block {
+        reason: "session belongs to another agent".into(),
+    };
+    let write_state = Arc::clone(state);
+    let owner = state.owners.get(agent).cloned().flatten();
+    let write_call = call.clone();
+    let write_decision = decision.clone();
+    let audited = tokio::task::spawn_blocking(move || match write_state.audit.lock() {
+        Ok(mut log) => log
+            .append(
+                &write_call,
+                &write_decision,
+                owner.as_deref(),
+                &policy_version,
+            )
+            .is_ok(),
+        Err(_) => false,
+    })
+    .await
+    .unwrap_or(false);
+    if !audited {
+        tracing::error!(agent = %agent, session_id, "failed to audit a session reuse attempt");
+    }
+    tracing::warn!(agent = %agent, session_id, "blocked: session belongs to another agent");
+}
+
+/// Binds `session_id` to `agent` (inserting or refreshing `last_seen`). If
+/// this would add a session beyond `max_sessions`, the single
+/// least-recently-seen entry is evicted first — memory can't grow forever,
+/// and the request that triggered this never fails because of the cap.
+fn bind_session(state: &AppState, agent: &AgentId, session_id: &str) {
+    let Ok(mut sessions) = state.sessions.lock() else {
+        return;
+    };
+    if !sessions.contains_key(session_id) && sessions.len() >= state.max_sessions {
+        let oldest = sessions
+            .iter()
+            .min_by_key(|(_, e)| e.last_seen)
+            .map(|(id, _)| id.clone());
+        if let Some(oldest) = oldest {
+            sessions.remove(&oldest);
+        }
+    }
+    sessions.insert(
+        session_id.to_string(),
+        SessionEntry {
+            agent: agent.clone(),
+            last_seen: Instant::now(),
+        },
+    );
 }
 
 /// Returns `Some(response)` if the call must not be forwarded.

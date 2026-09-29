@@ -51,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
             // watcher. `None` when --watch-policies wasn't given.
             let _policy_watcher =
                 custos_gateway::spawn_policy_reload_triggers(state.clone(), watch_policies)?;
+            custos_gateway::spawn_session_expiry_sweep(state.clone());
             let listener = tokio::net::TcpListener::bind(cfg.listen).await?;
             tracing::info!(listen = %cfg.listen, upstream = %cfg.upstream, agents = cfg.agents.len(), watch_policies, "custos gateway started");
             axum::serve(listener, app(state)).await?;

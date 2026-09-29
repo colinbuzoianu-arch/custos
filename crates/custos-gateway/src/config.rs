@@ -40,8 +40,25 @@ pub struct Config {
     /// Recorded on every audit entry. Defaults to the machine's hostname.
     #[serde(default)]
     pub instance_id: Option<String>,
+    /// How long an MCP session may sit idle before the gateway forgets it.
+    /// Default 24h.
+    #[serde(default = "default_session_idle_timeout_secs")]
+    pub session_idle_timeout_secs: u64,
+    /// Upper bound on how many MCP sessions the gateway tracks at once; the
+    /// least-recently-used one is evicted before this is exceeded. Default
+    /// 10,000.
+    #[serde(default = "default_max_sessions")]
+    pub max_sessions: usize,
     #[serde(default)]
     pub agents: Vec<AgentConfig>,
+}
+
+fn default_session_idle_timeout_secs() -> u64 {
+    24 * 60 * 60
+}
+
+fn default_max_sessions() -> usize {
+    10_000
 }
 
 #[derive(Debug, Clone, Deserialize)]

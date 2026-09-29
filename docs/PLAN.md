@@ -41,9 +41,9 @@ Work top to bottom. In Claude Code, `/next` picks up the first open box.
 - [x] Move audit writes off the async runtime (`spawn_blocking` or a writer task + channel)
 
 ### Session 5 — operable
-- [ ] `custos check-policy <dir>`: parse and report errors without starting
-- [ ] Reload policies on `SIGHUP` without dropping connections
-- [ ] Bind MCP session ids to the agent that created them (agent B must not reuse agent A's session)
+- [x] `custos check-policy <dir>`: parse and report errors without starting
+- [x] Reload policies on `SIGHUP` without dropping connections
+- [x] Bind MCP session ids to the agent that created them (agent B must not reuse agent A's session)
 - [ ] Dockerfile (distroless, non-root) + `docker compose` demo with an MCP server
 - [ ] Tag `v0.1.0`
 

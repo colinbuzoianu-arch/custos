@@ -1,12 +1,19 @@
 //! End-to-end: a fake upstream MCP server, the real gateway, a real HTTP client.
 
-use axum::{Json, Router, http::HeaderValue, response::Response, routing::post};
+use axum::{
+    Json, Router,
+    http::{HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
+    routing::post,
+};
 use custos_gateway::{AppState, BLOCKED_CODE, app, config, hash_token};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const TOKEN: &str = "test-token-invoice";
+const TOKEN_A: &str = "test-token-agent-a";
+const TOKEN_B: &str = "test-token-agent-b";
 
 const POLICY: &str = r#"
 @id("invoice-read")
@@ -58,6 +65,8 @@ async fn start_with_upstream(
         audit_arguments: config::AuditArgsMode::Full,
         audit_key_id: None,
         instance_id: Some("test-instance".into()),
+        session_idle_timeout_secs: 86_400,
+        max_sessions: 10_000,
         agents: vec![config::AgentConfig {
             id: "invoice-processor".into(),
             owner: Some("finance".into()),
@@ -232,6 +241,8 @@ async fn hash_mode_without_key_id_fails_to_start() -> anyhow::Result<()> {
         audit_arguments: config::AuditArgsMode::Hash,
         audit_key_id: None, // missing: "hash" mode must refuse to start
         instance_id: None,
+        session_idle_timeout_secs: 86_400,
+        max_sessions: 10_000,
         agents: vec![],
     };
     assert!(AppState::from_config(&cfg).is_err());
@@ -430,5 +441,196 @@ async fn tools_list_unknown_content_type_fails_closed() -> anyhow::Result<()> {
         .await?;
     assert_eq!(r["id"], 4);
     assert_eq!(r["error"]["code"], BLOCKED_CODE);
+    Ok(())
+}
+
+// --- session binding -------------------------------------------------
+
+/// A fake upstream that always tags its response with a fixed
+/// `Mcp-Session-Id`, as if it had just created (or were continuing) that
+/// session, and accepts `DELETE` (returning 200, no body).
+fn upstream_with_session_header(session_id: &'static str, hits: Arc<AtomicUsize>) -> Router {
+    let post_hits = hits.clone();
+    Router::new().route(
+        "/mcp",
+        post(move |Json(msg): Json<Value>| {
+            let hits = post_hits.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                let mut resp = Json(
+                    json!({"jsonrpc": "2.0", "id": msg["id"], "result": {"echo": msg["method"]}}),
+                )
+                .into_response();
+                resp.headers_mut()
+                    .insert("mcp-session-id", HeaderValue::from_static(session_id));
+                resp
+            }
+        })
+        .delete(move || {
+            let hits = hits.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                StatusCode::OK
+            }
+        }),
+    )
+}
+
+/// Like `start_with_upstream`, but with two agents (`TOKEN_A`/`TOKEN_B`)
+/// instead of one — needed for the session-binding tests, where a second
+/// agent tries to reuse the first one's session.
+async fn start_with_two_agents(
+    upstream: Router,
+    upstream_hits: Arc<AtomicUsize>,
+) -> anyhow::Result<Harness> {
+    let up = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let up_addr = up.local_addr()?;
+    tokio::spawn(async move { axum::serve(up, upstream).await });
+
+    let dir = tempfile::tempdir()?;
+    let policy_dir = dir.path().join("policies");
+    std::fs::create_dir(&policy_dir)?;
+    std::fs::write(policy_dir.join("test.cedar"), POLICY)?;
+    let audit = dir.path().join("audit.jsonl");
+
+    let cfg = config::Config {
+        listen: "127.0.0.1:0".parse()?,
+        upstream: format!("http://{up_addr}/mcp"),
+        upstream_authorization: None,
+        policy_dir,
+        audit_log: audit.clone(),
+        audit_arguments: config::AuditArgsMode::Full,
+        audit_key_id: None,
+        instance_id: Some("test-instance".into()),
+        session_idle_timeout_secs: 86_400,
+        max_sessions: 10_000,
+        agents: vec![
+            config::AgentConfig {
+                id: "agent-a".into(),
+                owner: None,
+                token_sha256: hash_token(TOKEN_A),
+            },
+            config::AgentConfig {
+                id: "agent-b".into(),
+                owner: None,
+                token_sha256: hash_token(TOKEN_B),
+            },
+        ],
+    };
+    let state = Arc::new(AppState::from_config(&cfg)?);
+    let gw = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let gw_addr = gw.local_addr()?;
+    let serve_state = state.clone();
+    tokio::spawn(async move { axum::serve(gw, app(serve_state)).await });
+
+    Ok(Harness {
+        base: format!("http://{gw_addr}/mcp"),
+        upstream_hits,
+        audit,
+        state,
+        _dir: dir,
+    })
+}
+
+async fn post_with_session(
+    h: &Harness,
+    token: &str,
+    session_id: &str,
+    body: &Value,
+) -> anyhow::Result<reqwest::Response> {
+    Ok(reqwest::Client::new()
+        .post(&h.base)
+        .bearer_auth(token)
+        .header("Mcp-Session-Id", session_id)
+        .json(body)
+        .send()
+        .await?)
+}
+
+async fn delete_with_session(
+    h: &Harness,
+    token: &str,
+    session_id: &str,
+) -> anyhow::Result<reqwest::Response> {
+    Ok(reqwest::Client::new()
+        .delete(&h.base)
+        .bearer_auth(token)
+        .header("Mcp-Session-Id", session_id)
+        .send()
+        .await?)
+}
+
+#[tokio::test]
+async fn session_reused_by_another_agent_is_forbidden_and_never_forwarded() -> anyhow::Result<()> {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let upstream = upstream_with_session_header("shared-session", hits.clone());
+    let h = start_with_two_agents(upstream, hits.clone()).await?;
+
+    // Agent A's first request carries no session id yet — upstream's
+    // response introduces one, which the gateway binds to agent A.
+    post_json(
+        &h,
+        Some(TOKEN_A),
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}),
+    )
+    .await?;
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    // Agent B tries to use that same session.
+    let r = post_with_session(
+        &h,
+        TOKEN_B,
+        "shared-session",
+        &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "x", "arguments": {}}}),
+    )
+    .await?;
+    assert_eq!(r.status(), 403);
+    // Never reached upstream: the hit count from agent A's call is unchanged.
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unknown_session_is_rejected() -> anyhow::Result<()> {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let upstream = upstream_with_session_header("irrelevant", hits.clone());
+    let h = start_with_two_agents(upstream, hits.clone()).await?;
+
+    let r = post_with_session(
+        &h,
+        TOKEN_A,
+        "no-such-session",
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}),
+    )
+    .await?;
+    assert_eq!(r.status(), 404);
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn deleted_session_is_rejected_afterward() -> anyhow::Result<()> {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let upstream = upstream_with_session_header("to-delete", hits.clone());
+    let h = start_with_two_agents(upstream, hits.clone()).await?;
+
+    post_json(
+        &h,
+        Some(TOKEN_A),
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}),
+    )
+    .await?;
+
+    let deleted = delete_with_session(&h, TOKEN_A, "to-delete").await?;
+    assert!(deleted.status().is_success());
+
+    let r = post_with_session(
+        &h,
+        TOKEN_A,
+        "to-delete",
+        &json!({"jsonrpc": "2.0", "id": 2, "method": "ping"}),
+    )
+    .await?;
+    assert_eq!(r.status(), 404);
     Ok(())
 }

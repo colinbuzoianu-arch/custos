@@ -34,6 +34,12 @@ audit_key_id = "2026-01"
 # records apart. Defaults to the machine's hostname if left unset.
 # instance_id = "gw-eu-1"
 
+# How long an MCP session may sit idle before the gateway forgets it, and
+# the most sessions it tracks at once (the least-recently-used one is
+# evicted first if this would be exceeded). Defaults shown.
+# session_idle_timeout_secs = 86400
+# max_sessions = 10000
+
 # One entry per agent. Create the hash with:
 #   cargo run -p custos-gateway -- hash-token <the-agent-token>
 [[agents]]
