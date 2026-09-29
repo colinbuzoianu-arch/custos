@@ -54,6 +54,7 @@ bug that blocks one. If a change would weaken any line below, stop and ask.
 - Keep changes small: one task from `docs/PLAN.md` per branch or commit. Tick its box when done.
 - Public functions get a one-line doc comment saying what they guarantee.
 - Architecture changes get a short ADR in `docs/decisions/`.
+- Design decisions written in `docs/PLAN.md` are decided; don't re-open them without asking Colin.
 
 ## Working with Colin
 

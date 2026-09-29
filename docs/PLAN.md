@@ -47,22 +47,137 @@ Work top to bottom. In Claude Code, `/next` picks up the first open box.
 - [x] Dockerfile (distroless, non-root) + `docker compose` demo with an MCP server
 - [ ] Tag `v0.1.0`
 
-## Week 2: inspection and humans in the loop
-- [ ] Content inspection on arguments: IBAN, credit cards, Romanian CNP, German tax ID, emails, API keys/secrets
-- [ ] Bulk-export rule (e.g. result or argument size above a limit)
-- [ ] `Hold` decisions: a Cedar annotation like `@hold("reason")` → call waits for approval via a local API
-- [ ] Short-lived agent tokens with expiry; `custos issue-token`
-- [ ] Policy context: time of day, argument facts from inspection, so rules can use `when { ... }`
+## Phase 2 — Gateway, part 2
 
-## Weeks 3–4: control plane (commercial)
-- [ ] Postgres schema: tenants, agents, owners, policies, approvals
-- [ ] Control API (Rust/axum), gateways pull signed policy bundles
-- [ ] ClickHouse audit sink, signed checkpoints of the hash chain
-- [ ] Dashboard (Next.js/TypeScript): agent inventory, live decisions, approval queue
-- [ ] Evidence export (PDF) for EU AI Act / NIS2, EN/DE/RO
+Each session = one branch/commit, `/check` green, `/security-review` before commit.
+
+### Session 6 — content inspection
+- [ ] New crate `custos-inspect`: pure functions, no I/O, `inspect(&serde_json::Value) -> Findings`.
+- [ ] Detectors: IBAN (with mod-97 checksum), payment cards (Luhn), Romanian CNP (checksum),
+      German Steuer-ID (checksum), email addresses, API keys/secrets (common prefixes like
+      `sk-`, `ghp_`, `AKIA`, plus high-entropy strings), bulk size (argument bytes, array length).
+- [ ] Walk nested JSON; cap depth and total bytes inspected (config) so hostile input can't slow the gateway.
+- [ ] Findings contain only kind + count + JSON path, never the matched value.
+- [ ] Record findings in the audit record (kinds and counts only).
+- Tests: valid and invalid checksums for each detector, nested/array input, oversized input
+  hits the cap and fails closed, matched values never appear in findings or audit.
+
+### Session 7 — inspection results in policy
+- [ ] Pass Cedar `context`: `findings` (set of kinds, e.g. `"iban"`), `args_bytes`, `array_max_len`,
+      `hour_utc`, `weekday`.
+- [ ] Add a Cedar schema file (`policies/custos.cedarschema`) and validate policies against it in
+      `check-policy` and on reload. Unknown attributes = error.
+- [ ] Example policies: forbid any call whose findings contain `card` or `secret`;
+      forbid `crm.*` exports with `array_max_len > 500`.
+- Tests: same tool allowed without findings and blocked with them; schema catches a typo.
+
+### Session 8 — short-lived agent tokens
+- [ ] `custos issue-token --agent <id> --ttl 1h`: signed token (Ed25519, compact format with
+      agent id, issued-at, expiry, key id). Gateway verifies signature and expiry.
+- [ ] Keep static hashed tokens as an option (`auth = "static" | "signed"`) for simple setups.
+- [ ] Key rotation: gateway accepts a list of public keys by key id.
+- Tests: expired token 401, wrong key 401, tampered payload 401, rotation works.
+- Tag `v0.2.0` of the gateway.
+
+## Phase 3 — Custos Control (the interface)
+
+### Decisions (write these into docs/decisions/0002-control-plane.md in session 9)
+- **Self-hosted first.** Customers run Control themselves via docker compose (Control + Postgres).
+  Their audit data never leaves their network, which removes a big sales objection. Our hosted
+  EU version comes later from the same code. Every table has `tenant_id` from day one.
+- **One binary.** New crate `custos-control` (Rust, axum, sqlx, Postgres). The dashboard is a
+  **Vite + React + TypeScript** single-page app in `dashboard/`, built and embedded into the
+  control binary (rust-embed). This replaces Next.js from ADR 0001: an admin app behind a login
+  doesn't need server rendering, and one binary is much simpler for customers to run.
+- **Postgres for audit search**, not ClickHouse, until a customer needs more. The gateway's
+  hash-chained file stays the source of truth; Control keeps a searchable copy.
+- **Gateways connect out to Control** (never the other way), so customers open no inbound ports.
+- **Control never holds agent tokens** in plain form and never sees raw tool arguments (only
+  what the audit mode allows).
+- Dashboard UI: same visual language as the landing page (ink #16181D, ivory #F4F1EA,
+  rust accent #B3401A, Newsreader headings, IBM Plex Sans/Mono), follow `design/dashboard/`
+  mockups if present. Languages EN/DE/RO from the start (i18n keys, no hard-coded strings).
+
+### Session 9 — Control skeleton and login
+- [ ] ADR 0002. Crate `custos-control`, sqlx migrations, `docker-compose.control.yml`
+      (control + postgres), `/healthz`.
+- [ ] Users: email + password (argon2id), roles `admin` / `approver` / `viewer`.
+      `custos-control create-admin` CLI for the first user.
+- [ ] Sessions: server-side, HttpOnly + Secure + SameSite=Strict cookies, CSRF protection,
+      login rate limiting, audit of logins.
+- Tests: login ok/fail, lockout after N failures, viewer can't call admin endpoints.
+
+### Session 10 — agents API
+- [ ] CRUD agents (id, name, owner user, description, status active/disabled, expiry date).
+- [ ] Issue/rotate an agent token from Control: shown once, stored only as hash.
+- [ ] Every change written to an admin audit log (who changed what, when).
+- Tests: token shown once only, disabled agent's token rejected after sync (session 12).
+
+### Session 11 — policies API
+- [ ] Policy sets stored with versions (text, author, message, created_at). Validate with Cedar
+      + schema on save; invalid versions can be saved as drafts but never published.
+- [ ] Publish = create a **policy bundle**: policies + schema + agent list (token hashes /
+      public keys) + version, signed with Control's Ed25519 key.
+- [ ] Diff between two versions (API returns a text diff).
+- Tests: invalid policy can't be published; bundle signature verifies; tampered bundle fails.
+
+### Session 12 — gateway enrolment and sync
+- [ ] `custos enroll --control <url> --token <one-time enrolment token>`: gateway gets an id and
+      credentials, pins Control's public key.
+- [ ] Gateway polls for new bundles (ETag), verifies the signature, applies via the reload path
+      from session 5a. Keeps the last good bundle on disk; if Control is unreachable it keeps
+      enforcing the last good bundle (never "allow all").
+- [ ] Heartbeat: version, policy_version, uptime, decision counts.
+- Tests: bad signature rejected and old bundle kept; Control offline → still enforcing.
+
+### Session 13 — audit shipping
+- [ ] Gateway ships audit records to Control in batches, with retry and backoff; local file is
+      the buffer, nothing is lost if Control is down. Idempotent by (gateway_id, seq).
+- [ ] Control checks chain continuity per gateway and flags gaps or broken hashes.
+- [ ] Search API: filter by agent, tool, verdict, time range, policy_version; cursor pagination.
+- [ ] Live stream endpoint (SSE) of new decisions for the dashboard.
+- Tests: duplicate batch ignored, gap detected, search filters correct.
+
+### Session 14 — dashboard shell
+- [ ] `dashboard/` with Vite + React + TS, router, i18n (EN/DE/RO), API client with CSRF.
+- [ ] Embedded in the control binary; `npm run dev` proxies to local Control for development.
+- [ ] Pages: Login, Overview (decisions today, blocked %, top blocked agents/tools, gateway
+      health), Agents (list, detail, create, disable, issue token).
+- [ ] Accessibility: keyboard navigation, visible focus, 4.5:1 contrast.
+
+### Session 15 — dashboard: live decisions, audit, policies
+- [ ] Live decisions page (SSE stream, pause, filter), click-through to the full record.
+- [ ] Audit search page with filters and CSV/JSON export.
+- [ ] Policy editor: CodeMirror with Cedar highlighting, validate as you type (via API),
+      version history with diff, publish button (admin only) with confirmation.
+
+### Session 16 — hold and human approval
+- [ ] Cedar annotation `@hold("reason")` on a permit: matching calls become `Hold`.
+- [ ] Gateway creates an approval request in Control and waits (long-poll) up to a timeout
+      (config, default 120 s). Approved → forward. Rejected or timeout → block. Control
+      unreachable → block. Every step audited.
+- [ ] Approvals page: pending queue, agent/tool/findings (never raw arguments unless audit
+      mode allows), approve/reject with comment, only `approver`/`admin` roles.
+- [ ] The approver can't be the agent's owner if `four_eyes = true` in the policy.
+- Tests: approve, reject, timeout, Control down, wrong role.
+
+### Session 17 — evidence export
+- [ ] Evidence pack for a time range: PDF report (EN/DE/RO) with agent inventory, active policies
+      and versions, decision statistics, approvals with approver names, chain-integrity result;
+      plus a signed JSON bundle of the underlying records.
+- [ ] Map sections to EU AI Act (human oversight, record-keeping), NIS2 (access control) and
+      GDPR (data minimisation) with a disclaimer that this is evidence, not a compliance verdict.
+
+### Session 18 — release
+- [ ] End-to-end demo in docker compose: MCP server + gateway + Control + Postgres + seeded
+      demo data. Update docs/DEMO.md.
+- [ ] Security pass: `/security-review` on the whole control crate, `cargo audit`, `npm audit`.
+- [ ] Tag `v0.3.0` — first version with the interface.
 
 ## Later
-- [ ] LLM API egress proxy (OpenAI/Anthropic calls, prompt data-loss checks)
+- [ ] OIDC login (Microsoft Entra ID, Google) for the dashboard
+- [ ] Hosted EU (Frankfurt) multi-tenant Control
+- [ ] LLM API egress proxy (OpenAI/Anthropic calls)
 - [ ] Optional Claude Haiku judge for ambiguous content (never in the default blocking path)
-- [ ] Formal policy analysis ("can any agent ever reach payroll?") using Cedar's analysis tooling
-- [ ] OAuth 2.1 authorization per the MCP spec instead of static bearer tokens
+- [ ] Formal policy analysis ("can any agent ever reach payroll?")
+- [ ] Notifications for pending approvals (email, Slack, Teams)
