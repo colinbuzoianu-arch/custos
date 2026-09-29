@@ -11,6 +11,29 @@ upstream = "http://127.0.0.1:3001/mcp"
 policy_dir = "policies"
 audit_log = "data/audit.jsonl"
 
+# How tool-call arguments are recorded in the audit log:
+#   "hash"     (default) — store an HMAC-SHA256 of the arguments plus their
+#              byte size, never the arguments themselves. Needs a key: set
+#              the CUSTOS_AUDIT_KEY environment variable to a hex or base64
+#              value of at least 32 bytes (e.g. `openssl rand -hex 32`, or
+#              on Windows PowerShell:
+#              -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Max 256) })
+#              ) and set audit_key_id below to label which key that is.
+#              The gateway refuses to start if the key is missing or short.
+#   "redacted" — keep the JSON shape and keys, replace every value with its
+#              type and length, e.g. {"iban": "<string:22>"}. No key needed.
+#   "full"     — store arguments as-is. May store personal data; logs a
+#              warning at startup. No key needed.
+audit_arguments = "hash"
+
+# Which CUSTOS_AUDIT_KEY is loaded, so audit records say what hashed them
+# without ever storing the key. Only used when audit_arguments = "hash".
+audit_key_id = "2026-01"
+
+# Recorded on every audit entry, so a multi-gateway deployment can tell
+# records apart. Defaults to the machine's hostname if left unset.
+# instance_id = "gw-eu-1"
+
 # One entry per agent. Create the hash with:
 #   cargo run -p custos-gateway -- hash-token <the-agent-token>
 [[agents]]

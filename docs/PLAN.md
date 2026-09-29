@@ -16,16 +16,16 @@ Work top to bottom. In Claude Code, `/next` picks up the first open box.
 ## Week 1: make it real
 
 ### Session 1 — set up and understand
-- [ ] Install rustup, VS Code, extensions from `.vscode/extensions.json`, Claude Code
+- [x] Install rustup, VS Code, extensions from `.vscode/extensions.json`, Claude Code
 - [x] `cargo test --workspace` passes locally
 - [x] Create a private GitHub repo, push, check the CI workflow goes green
 - [x] Add the Apache-2.0 `LICENSE` file (GitHub's "Add file → license template")
-- [ ] Ask Claude Code `/explain crates/custos-gateway/src/lib.rs` and read the request path once end to end
+- [x] Ask Claude Code `/explain crates/custos-gateway/src/lib.rs` and read the request path once end to end
 
 ### Session 2 — first real agent through Custos
 - [x] Run a real MCP server locally (e.g. the MCP reference "everything" server in streamable-HTTP mode)
 - [x] Copy `config/custos.example.toml` to `config/custos.toml`, point `upstream` at it, create a token with `hash-token`
-- [ ] Connect Claude Code (or Claude Desktop) to `http://127.0.0.1:8787/mcp` with the agent token as a header
+- [x] Connect Claude Code (or Claude Desktop) to `http://127.0.0.1:8787/mcp` with the agent token as a header
 - [x] Watch allowed and blocked calls in the log; run `verify-audit`
 - [x] Write `docs/DEMO.md` with the exact steps (becomes the README quick-start)
 
@@ -35,10 +35,10 @@ Work top to bottom. In Claude Code, `/next` picks up the first open box.
 - [x] Tests: filtered list, SSE case, unknown content-type fails closed
 
 ### Session 4 — audit that respects GDPR
-- [ ] Stop storing raw tool arguments by default: store a SHA-256 of the arguments plus a size
-- [ ] Config switch `audit_arguments = "hash" | "redacted" | "full"`
-- [ ] Add agent `owner` and gateway instance id to each record
-- [ ] Move audit writes off the async runtime (`spawn_blocking` or a writer task + channel)
+- [x] Stop storing raw tool arguments by default: store a SHA-256 of the arguments plus a size
+- [x] Config switch `audit_arguments = "hash" | "redacted" | "full"`
+- [x] Add agent `owner` and gateway instance id to each record
+- [x] Move audit writes off the async runtime (`spawn_blocking` or a writer task + channel)
 
 ### Session 5 — operable
 - [ ] `custos check-policy <dir>`: parse and report errors without starting

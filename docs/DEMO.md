@@ -20,6 +20,12 @@ upstream = "http://127.0.0.1:3001/mcp"
 policy_dir = "policies"
 audit_log = "data/audit.jsonl"
 
+# "redacted" keeps the demo simple (no signing key to generate). Production
+# should use the default "hash" mode instead — see config/custos.example.toml
+# and docs/ARCHITECTURE.md ("Recording arguments without recording personal
+# data") for what that needs.
+audit_arguments = "redacted"
+
 # Agent token (plaintext, only for this demo): custos-demo-token
 [[agents]]
 id = "demo-agent"

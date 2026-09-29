@@ -43,12 +43,20 @@ async fn start_with_upstream(
     std::fs::write(policy_dir.join("test.cedar"), POLICY)?;
     let audit = dir.path().join("audit.jsonl");
 
+    // These tests aren't about what the audit log records, just that the
+    // gateway allows/blocks/forwards correctly — "full" mode needs no
+    // signing key and keeps that out of scope. The GDPR-specific behaviour
+    // (hash mode, redaction, the audit key) has its own tests below and in
+    // `custos-audit`.
     let cfg = config::Config {
         listen: "127.0.0.1:0".parse()?,
         upstream: format!("http://{up_addr}/mcp"),
         upstream_authorization: None,
         policy_dir,
         audit_log: audit.clone(),
+        audit_arguments: config::AuditArgsMode::Full,
+        audit_key_id: None,
+        instance_id: Some("test-instance".into()),
         agents: vec![config::AgentConfig {
             id: "invoice-processor".into(),
             owner: Some("finance".into()),
@@ -185,6 +193,45 @@ async fn every_decision_is_audited_in_an_intact_chain() -> anyhow::Result<()> {
     post_json(&h, Some(TOKEN), &tool_call(3, "sap.execute_payment")).await?;
     let (count, _) = custos_audit::verify(&h.audit)?;
     assert_eq!(count, 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_tool_calls_are_all_audited_in_an_intact_chain() -> anyhow::Result<()> {
+    let h = start().await?;
+    const N: u64 = 20;
+    let bodies: Vec<Value> = (1..=N)
+        .map(|id| tool_call(id, "sap.read_invoice"))
+        .collect();
+    let calls = bodies.iter().map(|b| post_json(&h, Some(TOKEN), b));
+    let results = futures_util::future::join_all(calls).await;
+    for r in results {
+        r?;
+    }
+    let (count, _) = custos_audit::verify(&h.audit)?;
+    assert_eq!(count, N);
+    Ok(())
+}
+
+#[tokio::test]
+async fn hash_mode_without_key_id_fails_to_start() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let policy_dir = dir.path().join("policies");
+    std::fs::create_dir(&policy_dir)?;
+    std::fs::write(policy_dir.join("test.cedar"), POLICY)?;
+
+    let cfg = config::Config {
+        listen: "127.0.0.1:0".parse()?,
+        upstream: "http://127.0.0.1:0/mcp".into(),
+        upstream_authorization: None,
+        policy_dir,
+        audit_log: dir.path().join("audit.jsonl"),
+        audit_arguments: config::AuditArgsMode::Hash,
+        audit_key_id: None, // missing: "hash" mode must refuse to start
+        instance_id: None,
+        agents: vec![],
+    };
+    assert!(AppState::from_config(&cfg).is_err());
     Ok(())
 }
 

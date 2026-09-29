@@ -25,7 +25,10 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "str
 futures-util = "0.3"
 cedar-policy = "4"
 sha2 = "0.10"
+hmac = "0.12"
 hex = "0.4"
+base64 = "0.22"
+hostname = "0.4"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

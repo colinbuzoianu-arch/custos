@@ -44,6 +44,9 @@ pub struct AppState {
     pub audit: Mutex<AuditLog>,
     /// sha256(token) hex → agent
     pub agents: HashMap<String, AgentId>,
+    /// agent → human owner, for the audit log. Looked up separately from
+    /// `agents` so `authenticate` can keep returning a plain `AgentId`.
+    pub owners: HashMap<AgentId, Option<String>>,
     pub upstream: String,
     pub upstream_authorization: Option<String>,
     pub client: reqwest::Client,
@@ -52,16 +55,23 @@ pub struct AppState {
 impl AppState {
     pub fn from_config(cfg: &config::Config) -> anyhow::Result<Self> {
         let policy = PolicyEngine::from_dir(&cfg.policy_dir)?;
-        let audit = AuditLog::open(&cfg.audit_log)?;
+        let args_policy = cfg.args_policy()?;
+        let audit = AuditLog::open(&cfg.audit_log, args_policy, cfg.gateway_instance())?;
         let agents = cfg
             .agents
             .iter()
             .map(|a| (a.token_sha256.to_lowercase(), AgentId(a.id.clone())))
             .collect();
+        let owners = cfg
+            .agents
+            .iter()
+            .map(|a| (AgentId(a.id.clone()), a.owner.clone()))
+            .collect();
         Ok(Self {
             policy,
             audit: Mutex::new(audit),
             agents,
+            owners,
             upstream: cfg.upstream.clone(),
             upstream_authorization: cfg.upstream_authorization.clone(),
             client: reqwest::Client::new(),
@@ -122,7 +132,7 @@ async fn handle(
         }
         match msg.get("method").and_then(Value::as_str) {
             Some("tools/call") => {
-                if let Some(blocked) = check_tool_call(&state, &agent, &msg) {
+                if let Some(blocked) = check_tool_call(&state, &agent, &msg).await {
                     return blocked;
                 }
             }
@@ -139,7 +149,7 @@ async fn handle(
 }
 
 /// Returns `Some(response)` if the call must not be forwarded.
-fn check_tool_call(state: &AppState, agent: &AgentId, msg: &Value) -> Option<Response> {
+async fn check_tool_call(state: &Arc<AppState>, agent: &AgentId, msg: &Value) -> Option<Response> {
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
     let params = msg.get("params");
     let Some(tool) = params.and_then(|p| p.get("name")).and_then(Value::as_str) else {
@@ -159,11 +169,22 @@ fn check_tool_call(state: &AppState, agent: &AgentId, msg: &Value) -> Option<Res
     };
     let decision = state.policy.decide(&call);
 
-    // Record before acting. If the audit write fails, nothing goes through.
-    let audited = match state.audit.lock() {
-        Ok(mut log) => log.append(&call, &decision).is_ok(),
+    // Record before acting. The write (and its fsync) run on a blocking
+    // thread so they never stall the async reactor, but this still waits
+    // right here for it to finish: if the audit write fails, nothing goes
+    // through.
+    let write_state = Arc::clone(state);
+    let write_call = call.clone();
+    let write_decision = decision.clone();
+    let owner = state.owners.get(agent).cloned().flatten();
+    let audited = tokio::task::spawn_blocking(move || match write_state.audit.lock() {
+        Ok(mut log) => log
+            .append(&write_call, &write_decision, owner.as_deref())
+            .is_ok(),
         Err(_) => false,
-    };
+    })
+    .await
+    .unwrap_or(false);
     if !audited {
         tracing::error!(agent = %agent, tool, "audit write failed; blocking");
         return Some((StatusCode::SERVICE_UNAVAILABLE, "audit log unavailable").into_response());
