@@ -46,27 +46,7 @@ impl PolicyEngine {
 
     /// Load every `*.cedar` file in a directory, in name order.
     pub fn from_dir(dir: &Path) -> Result<Self, PolicyError> {
-        let io = |e| PolicyError::Io {
-            path: dir.display().to_string(),
-            source: e,
-        };
-        let mut files: Vec<_> = std::fs::read_dir(dir)
-            .map_err(io)?
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "cedar"))
-            .collect();
-        files.sort();
-        let mut src = String::new();
-        for f in files {
-            let text = std::fs::read_to_string(&f).map_err(|e| PolicyError::Io {
-                path: f.display().to_string(),
-                source: e,
-            })?;
-            src.push_str(&text);
-            src.push('\n');
-        }
-        Self::parse(&src)
+        Self::parse(&concatenated_source(dir)?)
     }
 
     /// Decide on one tool call. Never panics; any internal error blocks.
@@ -120,6 +100,117 @@ impl PolicyEngine {
 fn uid(kind: &str, id: &str) -> Result<EntityUid, PolicyError> {
     let quoted = serde_json::to_string(id).map_err(|e| PolicyError::Uid(e.to_string()))?;
     EntityUid::from_str(&format!("{kind}::{quoted}")).map_err(|e| PolicyError::Uid(e.to_string()))
+}
+
+/// Every `*.cedar` file in `dir`, in name order — the order that determines
+/// both the concatenated source `from_dir` parses and the input to the
+/// `policy_version` hash, so it must be stable.
+fn sorted_cedar_files(dir: &Path) -> Result<Vec<std::path::PathBuf>, PolicyError> {
+    let io = |e| PolicyError::Io {
+        path: dir.display().to_string(),
+        source: e,
+    };
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .map_err(io)?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "cedar"))
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
+/// The exact text `from_dir` builds its `PolicySet` from: every `*.cedar`
+/// file in `dir`, name-sorted, concatenated with a blank line between them.
+pub fn concatenated_source(dir: &Path) -> Result<String, PolicyError> {
+    let mut src = String::new();
+    for f in sorted_cedar_files(dir)? {
+        let text = std::fs::read_to_string(&f).map_err(|e| PolicyError::Io {
+            path: f.display().to_string(),
+            source: e,
+        })?;
+        src.push_str(&text);
+        src.push('\n');
+    }
+    Ok(src)
+}
+
+/// One `.cedar` file's validation result, from [`check_dir`].
+pub struct FileCheck {
+    pub path: std::path::PathBuf,
+    /// Number of policies in this file, or `0` if it failed to parse.
+    pub policy_count: usize,
+    /// Parse errors, each prefixed `line N: ` when Cedar reports a location.
+    pub errors: Vec<String>,
+    /// Cedar-generated ids (`policy0`, ...) of policies with no `@id`
+    /// annotation — block reasons use `@id`, so these decide silently.
+    pub missing_id: Vec<String>,
+}
+
+impl FileCheck {
+    pub fn is_valid(&self) -> bool {
+        self.errors.is_empty()
+    }
+}
+
+/// Validates every `*.cedar` file in `dir` **individually** (unlike
+/// `from_dir`, which concatenates them into one `PolicySet` to build the
+/// engine that actually decides calls) so a syntax error's line number and
+/// the "no `@id`" warning are both attributable to one file. `Err` only for
+/// a directory that can't be read at all.
+pub fn check_dir(dir: &Path) -> Result<Vec<FileCheck>, PolicyError> {
+    sorted_cedar_files(dir)?
+        .into_iter()
+        .map(|path| {
+            let text = std::fs::read_to_string(&path).map_err(|e| PolicyError::Io {
+                path: path.display().to_string(),
+                source: e,
+            })?;
+            Ok(check_file(path, &text))
+        })
+        .collect()
+}
+
+fn check_file(path: std::path::PathBuf, text: &str) -> FileCheck {
+    match PolicySet::from_str(text) {
+        Ok(policies) => {
+            let missing_id = policies
+                .policies()
+                .filter(|p| p.annotation("id").is_none())
+                .map(|p| p.id().to_string())
+                .collect();
+            FileCheck {
+                path,
+                policy_count: policies.policies().count(),
+                errors: Vec::new(),
+                missing_id,
+            }
+        }
+        Err(e) => FileCheck {
+            path,
+            policy_count: 0,
+            errors: describe_parse_errors(&e, text),
+            missing_id: Vec::new(),
+        },
+    }
+}
+
+/// Formats each underlying parse error, prefixed with its line number in
+/// `text` when Cedar's diagnostics give us a byte offset to count lines up
+/// to; otherwise just the message.
+fn describe_parse_errors(errors: &cedar_policy::ParseErrors, text: &str) -> Vec<String> {
+    use miette::Diagnostic;
+    errors
+        .iter()
+        .map(|e| match e.labels().and_then(|mut ls| ls.next()) {
+            Some(label) => {
+                let offset = label.offset().min(text.len());
+                let line = text[..offset].matches('\n').count() + 1;
+                format!("line {line}: {e}")
+            }
+            None => e.to_string(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -214,5 +305,78 @@ mod tests {
             e.decide(&call("invoice-processor", "sap.read_invoice"))
                 .is_allowed()
         );
+    }
+
+    // --- check_dir ---------------------------------------------------
+
+    fn write(dir: &tempfile::TempDir, name: &str, contents: &str) {
+        if let Err(e) = std::fs::write(dir.path().join(name), contents) {
+            panic!("{e}");
+        }
+    }
+
+    #[test]
+    fn check_dir_reports_a_valid_file() -> Result<(), PolicyError> {
+        let dir = tempfile::tempdir().map_err(|e| PolicyError::Io {
+            path: "<tempdir>".into(),
+            source: e,
+        })?;
+        write(&dir, "a.cedar", POLICY);
+        let reports = check_dir(dir.path())?;
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].is_valid());
+        assert_eq!(reports[0].policy_count, 2);
+        assert!(reports[0].missing_id.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn check_dir_names_the_broken_file_and_a_line() -> Result<(), PolicyError> {
+        let dir = tempfile::tempdir().map_err(|e| PolicyError::Io {
+            path: "<tempdir>".into(),
+            source: e,
+        })?;
+        write(&dir, "good.cedar", POLICY);
+        write(
+            &dir,
+            "bad.cedar",
+            "permit (\n    principal,\n    action,\n    resource\n);\nthis is not cedar",
+        );
+        let reports = check_dir(dir.path())?;
+        assert_eq!(reports.len(), 2);
+
+        let good = reports.iter().find(|r| r.path.ends_with("good.cedar"));
+        assert!(good.is_some_and(FileCheck::is_valid));
+
+        let bad = reports.iter().find(|r| r.path.ends_with("bad.cedar"));
+        let Some(bad) = bad else {
+            panic!("bad.cedar must be in the report");
+        };
+        assert!(!bad.is_valid());
+        assert!(
+            bad.errors.iter().any(|e| e.starts_with("line 6:")),
+            "{:?}",
+            bad.errors
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn check_dir_warns_about_missing_id() -> Result<(), PolicyError> {
+        let dir = tempfile::tempdir().map_err(|e| PolicyError::Io {
+            path: "<tempdir>".into(),
+            source: e,
+        })?;
+        write(
+            &dir,
+            "no-id.cedar",
+            r#"permit (principal, action, resource == Tool::"echo");"#,
+        );
+        let reports = check_dir(dir.path())?;
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].is_valid());
+        assert_eq!(reports[0].policy_count, 1);
+        assert_eq!(reports[0].missing_id.len(), 1);
+        Ok(())
     }
 }

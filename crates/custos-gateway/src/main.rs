@@ -21,6 +21,9 @@ enum Cmd {
     HashToken { token: String },
     /// Check that an audit log's hash chain is intact.
     VerifyAudit { path: PathBuf },
+    /// Parse and validate every `*.cedar` file in a directory, without
+    /// starting the gateway. Exit 0 if all are valid, 1 otherwise.
+    CheckPolicy { dir: PathBuf },
 }
 
 #[tokio::main]
@@ -48,6 +51,36 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         },
+        Cmd::CheckPolicy { dir } => {
+            let reports = match custos_policy::check_dir(&dir) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("FAILED: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let mut ok = true;
+            let mut total_policies = 0;
+            for r in &reports {
+                if r.is_valid() {
+                    total_policies += r.policy_count;
+                    println!("OK: {} ({} policies)", r.path.display(), r.policy_count);
+                    for id in &r.missing_id {
+                        println!("  warning: {} has no @id ({id})", r.path.display());
+                    }
+                } else {
+                    ok = false;
+                    for e in &r.errors {
+                        eprintln!("{}: {e}", r.path.display());
+                    }
+                }
+            }
+            if ok {
+                println!("OK: {total_policies} policies in {} file(s)", reports.len());
+            } else {
+                std::process::exit(1);
+            }
+        }
     }
     Ok(())
 }

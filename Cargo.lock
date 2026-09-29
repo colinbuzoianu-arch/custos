@@ -540,6 +540,7 @@ version = "0.1.0"
 dependencies = [
  "cedar-policy",
  "custos-core",
+ "miette",
  "serde_json",
  "tempfile",
  "thiserror",
