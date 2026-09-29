@@ -67,6 +67,8 @@ async fn start_with_upstream(
         instance_id: Some("test-instance".into()),
         session_idle_timeout_secs: 86_400,
         max_sessions: 10_000,
+        auth: config::AuthMode::Static,
+        signing_keys: vec![],
         agents: vec![config::AgentConfig {
             id: "invoice-processor".into(),
             owner: Some("finance".into()),
@@ -270,6 +272,8 @@ async fn hash_mode_without_key_id_fails_to_start() -> anyhow::Result<()> {
         instance_id: None,
         session_idle_timeout_secs: 86_400,
         max_sessions: 10_000,
+        auth: config::AuthMode::Static,
+        signing_keys: vec![],
         agents: vec![],
     };
     assert!(AppState::from_config(&cfg).is_err());
@@ -531,6 +535,8 @@ async fn start_with_two_agents(
         instance_id: Some("test-instance".into()),
         session_idle_timeout_secs: 86_400,
         max_sessions: 10_000,
+        auth: config::AuthMode::Static,
+        signing_keys: vec![],
         agents: vec![
             config::AgentConfig {
                 id: "agent-a".into(),
@@ -659,5 +665,208 @@ async fn deleted_session_is_rejected_afterward() -> anyhow::Result<()> {
     )
     .await?;
     assert_eq!(r.status(), 404);
+    Ok(())
+}
+
+// --- signed tokens (auth = "signed") ----------------------------------
+
+/// Like `start()`, but `auth = "signed"` with the given trusted keys instead
+/// of a static token list.
+async fn start_with_signed_auth(
+    signing_keys: Vec<config::SigningKeyConfig>,
+) -> anyhow::Result<Harness> {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let h = hits.clone();
+    let upstream = Router::new().route(
+        "/mcp",
+        post(move |Json(msg): Json<Value>| {
+            let h = h.clone();
+            async move {
+                h.fetch_add(1, Ordering::SeqCst);
+                Json(json!({"jsonrpc": "2.0", "id": msg["id"], "result": {"echo": msg["method"]}}))
+            }
+        }),
+    );
+    let up = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let up_addr = up.local_addr()?;
+    tokio::spawn(async move { axum::serve(up, upstream).await });
+
+    let dir = tempfile::tempdir()?;
+    let policy_dir = dir.path().join("policies");
+    std::fs::create_dir(&policy_dir)?;
+    std::fs::write(
+        policy_dir.join("test.cedar"),
+        r#"permit (principal, action, resource == Tool::"sap.read_invoice");"#,
+    )?;
+    let audit = dir.path().join("audit.jsonl");
+
+    let cfg = config::Config {
+        listen: "127.0.0.1:0".parse()?,
+        upstream: format!("http://{up_addr}/mcp"),
+        upstream_authorization: None,
+        policy_dir,
+        audit_log: audit.clone(),
+        audit_arguments: config::AuditArgsMode::Full,
+        audit_key_id: None,
+        instance_id: Some("test-instance".into()),
+        session_idle_timeout_secs: 86_400,
+        max_sessions: 10_000,
+        auth: config::AuthMode::Signed,
+        signing_keys,
+        agents: vec![],
+    };
+    let state = Arc::new(AppState::from_config(&cfg)?);
+    let gw = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let gw_addr = gw.local_addr()?;
+    let serve_state = state.clone();
+    tokio::spawn(async move { axum::serve(gw, app(serve_state)).await });
+
+    Ok(Harness {
+        base: format!("http://{gw_addr}/mcp"),
+        upstream_hits: hits,
+        audit,
+        state,
+        _dir: dir,
+    })
+}
+
+fn test_signing_key(seed: u8) -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
+}
+
+fn signing_key_config(key_id: &str, key: &ed25519_dalek::SigningKey) -> config::SigningKeyConfig {
+    config::SigningKeyConfig {
+        key_id: key_id.to_string(),
+        public_key: hex::encode(key.verifying_key().to_bytes()),
+    }
+}
+
+#[tokio::test]
+async fn valid_signed_token_authenticates() -> anyhow::Result<()> {
+    let key = test_signing_key(1);
+    let h = start_with_signed_auth(vec![signing_key_config("k1", &key)]).await?;
+    let token = custos_tokens::issue(
+        &key,
+        "invoice-processor",
+        custos_gateway::now_unix(),
+        3600,
+        "k1",
+    );
+
+    let r: Value = post_json(&h, Some(&token), &tool_call(1, "sap.read_invoice"))
+        .await?
+        .json()
+        .await?;
+    assert_eq!(r["result"]["echo"], "tools/call");
+    assert_eq!(h.upstream_hits.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn expired_signed_token_is_rejected() -> anyhow::Result<()> {
+    let key = test_signing_key(1);
+    let h = start_with_signed_auth(vec![signing_key_config("k1", &key)]).await?;
+    // Issued an hour ago with a 1-second TTL: already expired.
+    let token = custos_tokens::issue(
+        &key,
+        "invoice-processor",
+        custos_gateway::now_unix() - 3600,
+        1,
+        "k1",
+    );
+
+    let status = post_json(&h, Some(&token), &tool_call(1, "sap.read_invoice"))
+        .await?
+        .status();
+    assert_eq!(status, 401);
+    assert_eq!(h.upstream_hits.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn signed_token_from_an_untrusted_key_is_rejected() -> anyhow::Result<()> {
+    let trusted = test_signing_key(1);
+    let untrusted = test_signing_key(2);
+    // The gateway only trusts "k1" -> trusted's public key; a token signed
+    // by a different key, even under the same key_id, must not verify.
+    let h = start_with_signed_auth(vec![signing_key_config("k1", &trusted)]).await?;
+    let token = custos_tokens::issue(
+        &untrusted,
+        "invoice-processor",
+        custos_gateway::now_unix(),
+        3600,
+        "k1",
+    );
+
+    let status = post_json(&h, Some(&token), &tool_call(1, "sap.read_invoice"))
+        .await?
+        .status();
+    assert_eq!(status, 401);
+    assert_eq!(h.upstream_hits.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn tampered_signed_token_is_rejected() -> anyhow::Result<()> {
+    let key = test_signing_key(1);
+    let h = start_with_signed_auth(vec![signing_key_config("k1", &key)]).await?;
+    let token = custos_tokens::issue(
+        &key,
+        "invoice-processor",
+        custos_gateway::now_unix(),
+        3600,
+        "k1",
+    );
+    let Some((payload_part, sig_part)) = token.split_once('.') else {
+        panic!("token must have a payload and a signature segment");
+    };
+    // Flip one character in the (base64) payload segment — same shape,
+    // different, unsigned content.
+    let mut chars: Vec<char> = payload_part.chars().collect();
+    if let Some(c) = chars.first_mut() {
+        *c = if *c == 'a' { 'b' } else { 'a' };
+    }
+    let tampered = format!("{}.{sig_part}", chars.into_iter().collect::<String>());
+
+    let status = post_json(&h, Some(&tampered), &tool_call(1, "sap.read_invoice"))
+        .await?
+        .status();
+    assert_eq!(status, 401);
+    assert_eq!(h.upstream_hits.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn key_rotation_accepts_tokens_from_either_key() -> anyhow::Result<()> {
+    let old_key = test_signing_key(1);
+    let new_key = test_signing_key(2);
+    let h = start_with_signed_auth(vec![
+        signing_key_config("old", &old_key),
+        signing_key_config("new", &new_key),
+    ])
+    .await?;
+
+    let old_token = custos_tokens::issue(
+        &old_key,
+        "invoice-processor",
+        custos_gateway::now_unix(),
+        3600,
+        "old",
+    );
+    let new_token = custos_tokens::issue(
+        &new_key,
+        "invoice-processor",
+        custos_gateway::now_unix(),
+        3600,
+        "new",
+    );
+
+    for token in [old_token, new_token] {
+        let status = post_json(&h, Some(&token), &tool_call(1, "sap.read_invoice"))
+            .await?
+            .status();
+        assert_eq!(status, 200);
+    }
+    assert_eq!(h.upstream_hits.load(Ordering::SeqCst), 2);
     Ok(())
 }

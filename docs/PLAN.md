@@ -72,12 +72,12 @@ Each session = one branch/commit, `/check` green, `/security-review` before comm
 - Tests: same tool allowed without findings and blocked with them; schema catches a typo.
 
 ### Session 8 — short-lived agent tokens
-- [ ] `custos issue-token --agent <id> --ttl 1h`: signed token (Ed25519, compact format with
+- [x] `custos issue-token --agent <id> --ttl 1h`: signed token (Ed25519, compact format with
       agent id, issued-at, expiry, key id). Gateway verifies signature and expiry.
-- [ ] Keep static hashed tokens as an option (`auth = "static" | "signed"`) for simple setups.
-- [ ] Key rotation: gateway accepts a list of public keys by key id.
+- [x] Keep static hashed tokens as an option (`auth = "static" | "signed"`) for simple setups.
+- [x] Key rotation: gateway accepts a list of public keys by key id.
 - Tests: expired token 401, wrong key 401, tampered payload 401, rotation works.
-- Tag `v0.2.0` of the gateway.
+- [ ] Tag `v0.2.0` of the gateway.
 
 ## Phase 3 — Custos Control (the interface)
 

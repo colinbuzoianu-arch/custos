@@ -40,6 +40,24 @@ audit_key_id = "2026-01"
 # session_idle_timeout_secs = 86400
 # max_sessions = 10000
 
+# How agents authenticate:
+#   "static" (default) — a bearer token compared as a SHA-256 hash against
+#              [[agents]] below. Never expires; simplest to set up.
+#   "signed" — a short-lived, Ed25519-signed token from `custos issue-token`,
+#              checked against [[signing_keys]] below. No token_sha256
+#              needed on agents in this mode.
+auth = "static"
+
+# Only used when auth = "signed". One entry per trusted public key; list
+# both the old and new key while rotating. Generate the matching private
+# (signing) key the same way as CUSTOS_AUDIT_KEY, e.g. `openssl rand -hex 32`,
+# put it in the CUSTOS_SIGNING_KEY environment variable (never in config),
+# and get the public key from `custos issue-token`'s own output — or derive
+# it from the seed with any Ed25519 tool.
+# [[signing_keys]]
+# key_id = "2026-01"
+# public_key = "REPLACE_WITH_ED25519_PUBLIC_KEY"
+
 # One entry per agent. Create the hash with:
 #   cargo run -p custos-gateway -- hash-token <the-agent-token>
 [[agents]]

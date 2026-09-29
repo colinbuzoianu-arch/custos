@@ -37,6 +37,38 @@ enum Cmd {
         #[arg(short, long, default_value = "config/custos.toml")]
         config: PathBuf,
     },
+    /// Issue a short-lived, Ed25519-signed agent token (for `auth =
+    /// "signed"`). Reads the signing key from CUSTOS_SIGNING_KEY (hex or
+    /// base64, 32 bytes) - generate one the same way as CUSTOS_AUDIT_KEY,
+    /// e.g. `openssl rand -hex 32`. Never held in config, never logged.
+    IssueToken {
+        #[arg(long)]
+        agent: String,
+        /// e.g. `30m`, `1h`, `2d`.
+        #[arg(long, value_parser = parse_ttl_secs)]
+        ttl: i64,
+        /// Which trusted key signed this token — must match a `key_id` in
+        /// the gateway's `[[signing_keys]]`.
+        #[arg(long)]
+        key_id: String,
+    },
+}
+
+/// Parses a duration like `30m`, `1h`, `2d` into seconds. Hand-rolled rather
+/// than pulling in a duration-parsing crate for one CLI flag.
+fn parse_ttl_secs(s: &str) -> Result<i64, String> {
+    let (num, unit) = s.split_at(s.len().saturating_sub(1));
+    let n: i64 = num
+        .parse()
+        .map_err(|_| format!("{s:?}: expected a number followed by s/m/h/d, e.g. 1h"))?;
+    let secs = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 60 * 60,
+        "d" => 24 * 60 * 60,
+        _ => return Err(format!("{s:?}: unit must be one of s, m, h, d")),
+    };
+    Ok(n * secs)
 }
 
 #[tokio::main]
@@ -135,6 +167,34 @@ async fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             }
+        }
+        Cmd::IssueToken { agent, ttl, key_id } => {
+            let raw = match std::env::var(custos_gateway::config::SIGNING_KEY_ENV) {
+                Ok(v) => v,
+                Err(_) => {
+                    eprintln!(
+                        "FAILED: {} is not set",
+                        custos_gateway::config::SIGNING_KEY_ENV
+                    );
+                    std::process::exit(1);
+                }
+            };
+            let seed = match custos_tokens::decode_key_32(&raw) {
+                Ok(k) => k,
+                Err(e) => {
+                    eprintln!("FAILED: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+            let token = custos_tokens::issue(
+                &signing_key,
+                &agent,
+                custos_gateway::now_unix(),
+                ttl,
+                &key_id,
+            );
+            println!("{token}");
         }
     }
     Ok(())

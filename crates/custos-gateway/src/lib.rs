@@ -55,8 +55,11 @@ struct SessionEntry {
 pub struct AppState {
     pub policy: PolicyStore,
     pub audit: Mutex<AuditLog>,
-    /// sha256(token) hex → agent
+    pub auth: config::AuthMode,
+    /// sha256(token) hex → agent. Only consulted when `auth = "static"`.
     pub agents: HashMap<String, AgentId>,
+    /// key_id → public key. Only consulted when `auth = "signed"`.
+    pub verifying_keys: HashMap<String, ed25519_dalek::VerifyingKey>,
     /// agent → human owner, for the audit log. Looked up separately from
     /// `agents` so `authenticate` can keep returning a plain `AgentId`.
     pub owners: HashMap<AgentId, Option<String>>,
@@ -84,10 +87,13 @@ impl AppState {
             .iter()
             .map(|a| (AgentId(a.id.clone()), a.owner.clone()))
             .collect();
+        let verifying_keys = cfg.verifying_keys()?;
         Ok(Self {
             policy,
             audit: Mutex::new(audit),
+            auth: cfg.auth,
             agents,
+            verifying_keys,
             owners,
             sessions: Mutex::new(HashMap::new()),
             session_idle_timeout: Duration::from_secs(cfg.session_idle_timeout_secs),
@@ -207,8 +213,24 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> Option<AgentId> {
     if token.is_empty() {
         return None;
     }
-    // Lookup is by hash, so the plain token is never compared or stored.
-    state.agents.get(&hash_token(token)).cloned()
+    match state.auth {
+        // Lookup is by hash, so the plain token is never compared or stored.
+        config::AuthMode::Static => state.agents.get(&hash_token(token)).cloned(),
+        config::AuthMode::Signed => {
+            let payload = custos_tokens::verify(token, &state.verifying_keys, now_unix()).ok()?;
+            Some(AgentId(payload.agent))
+        }
+    }
+}
+
+/// Current Unix time in seconds. `0` if the clock is somehow before 1970
+/// rather than panicking — `custos_tokens::verify` then just treats every
+/// token as expired, which is the fail-closed outcome anyway.
+pub fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 async fn handle(

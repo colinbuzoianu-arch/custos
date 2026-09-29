@@ -1,5 +1,6 @@
 use custos_audit::ArgsPolicy;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -12,6 +13,27 @@ pub enum AuditArgsMode {
     Hash,
     Redacted,
     Full,
+}
+
+/// How agents authenticate. See `config/custos.example.toml`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthMode {
+    /// Bearer token compared as a SHA-256 hash against `[[agents]]`. Never
+    /// expires; simplest to set up.
+    #[default]
+    Static,
+    /// Bearer token is an Ed25519-signed, expiring token from `custos
+    /// issue-token`, checked against `[[signing_keys]]`.
+    Signed,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SigningKeyConfig {
+    pub key_id: String,
+    /// Ed25519 public key, hex or base64. Only used when `auth = "signed"`.
+    pub public_key: String,
 }
 
 /// Gateway configuration, loaded from TOML. See `config/custos.example.toml`.
@@ -49,6 +71,13 @@ pub struct Config {
     /// 10,000.
     #[serde(default = "default_max_sessions")]
     pub max_sessions: usize,
+    /// How agents authenticate. Default `static`.
+    #[serde(default)]
+    pub auth: AuthMode,
+    /// Public keys trusted to sign agent tokens, by key id. Only used when
+    /// `auth = "signed"`; list both the old and new key while rotating.
+    #[serde(default)]
+    pub signing_keys: Vec<SigningKeyConfig>,
     #[serde(default)]
     pub agents: Vec<AgentConfig>,
 }
@@ -129,4 +158,27 @@ impl Config {
                 .unwrap_or_else(|| "unknown".into())
         })
     }
+
+    /// Decodes every `[[signing_keys]]` entry into a verifying key, keyed by
+    /// `key_id`. `Err` if `auth = "signed"` but the list is empty, or any
+    /// entry doesn't decode to a valid Ed25519 public key — refusing to
+    /// start beats starting up unable to authenticate anyone.
+    pub fn verifying_keys(&self) -> anyhow::Result<HashMap<String, ed25519_dalek::VerifyingKey>> {
+        if self.auth == AuthMode::Signed && self.signing_keys.is_empty() {
+            anyhow::bail!("auth = \"signed\" requires at least one [[signing_keys]] entry");
+        }
+        self.signing_keys
+            .iter()
+            .map(|k| {
+                let bytes = custos_tokens::decode_key_32(&k.public_key)?;
+                let key = ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+                    .map_err(|e| anyhow::anyhow!("signing_keys[{}]: {e}", k.key_id))?;
+                Ok((k.key_id.clone(), key))
+            })
+            .collect()
+    }
 }
+
+/// Environment variable holding the raw Ed25519 signing seed for `custos
+/// issue-token`, hex- or base64-encoded. Never held in config, never logged.
+pub const SIGNING_KEY_ENV: &str = "CUSTOS_SIGNING_KEY";
