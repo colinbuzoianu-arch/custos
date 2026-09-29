@@ -545,6 +545,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "custos-inspect"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "custos-policy"
 version = "0.1.0"
 dependencies = [

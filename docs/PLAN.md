@@ -52,12 +52,12 @@ Work top to bottom. In Claude Code, `/next` picks up the first open box.
 Each session = one branch/commit, `/check` green, `/security-review` before commit.
 
 ### Session 6 — content inspection
-- [ ] New crate `custos-inspect`: pure functions, no I/O, `inspect(&serde_json::Value) -> Findings`.
-- [ ] Detectors: IBAN (with mod-97 checksum), payment cards (Luhn), Romanian CNP (checksum),
+- [x] New crate `custos-inspect`: pure functions, no I/O, `inspect(&serde_json::Value) -> Findings`.
+- [x] Detectors: IBAN (with mod-97 checksum), payment cards (Luhn), Romanian CNP (checksum),
       German Steuer-ID (checksum), email addresses, API keys/secrets (common prefixes like
       `sk-`, `ghp_`, `AKIA`, plus high-entropy strings), bulk size (argument bytes, array length).
-- [ ] Walk nested JSON; cap depth and total bytes inspected (config) so hostile input can't slow the gateway.
-- [ ] Findings contain only kind + count + JSON path, never the matched value.
+- [x] Walk nested JSON; cap depth and total bytes inspected (config) so hostile input can't slow the gateway.
+- [x] Findings contain only kind + count + JSON path, never the matched value.
 - [ ] Record findings in the audit record (kinds and counts only).
 - Tests: valid and invalid checksums for each detector, nested/array input, oversized input
   hits the cap and fails closed, matched values never appear in findings or audit.

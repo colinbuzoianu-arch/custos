@@ -13,6 +13,7 @@ rust-version = "1.88"
 custos-core = { path = "crates/custos-core" }
 custos-policy = { path = "crates/custos-policy" }
 custos-audit = { path = "crates/custos-audit" }
+custos-inspect = { path = "crates/custos-inspect" }
 
 anyhow = "1"
 thiserror = "2"
