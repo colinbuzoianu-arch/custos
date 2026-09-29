@@ -44,7 +44,7 @@ Work top to bottom. In Claude Code, `/next` picks up the first open box.
 - [x] `custos check-policy <dir>`: parse and report errors without starting
 - [x] Reload policies on `SIGHUP` without dropping connections
 - [x] Bind MCP session ids to the agent that created them (agent B must not reuse agent A's session)
-- [ ] Dockerfile (distroless, non-root) + `docker compose` demo with an MCP server
+- [x] Dockerfile (distroless, non-root) + `docker compose` demo with an MCP server
 - [ ] Tag `v0.1.0`
 
 ## Week 2: inspection and humans in the loop
