@@ -1,0 +1,25 @@
+services:
+  # The MCP server Custos protects. Not reachable from the host directly —
+  # only custos, over the compose network, can reach it.
+  everything:
+    image: node:22-alpine
+    command: ["npx", "-y", "@modelcontextprotocol/server-everything", "streamableHttp"]
+    expose:
+      - "3001"
+
+  custos:
+    build: .
+    depends_on:
+      - everything
+    ports:
+      # Bound to loopback only — not reachable from outside this machine.
+      - "127.0.0.1:8787:8787"
+    environment:
+      - CUSTOS_AUDIT_KEY=${CUSTOS_AUDIT_KEY:-}
+    volumes:
+      - ./policies:/etc/custos/policies:ro
+      - ./config/custos.docker.toml:/etc/custos/custos.toml:ro
+      - custos-data:/var/lib/custos
+
+volumes:
+  custos-data:

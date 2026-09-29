@@ -29,6 +29,14 @@ enum Cmd {
     /// Parse and validate every `*.cedar` file in a directory, without
     /// starting the gateway. Exit 0 if all are valid, 1 otherwise.
     CheckPolicy { dir: PathBuf },
+    /// Check that a running gateway (started with the same config) is
+    /// answering `/healthz`. Exit 0 if it is, 1 otherwise. Distroless images
+    /// have no shell or curl, so this is what the container HEALTHCHECK
+    /// runs instead.
+    Healthcheck {
+        #[arg(short, long, default_value = "config/custos.toml")]
+        config: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -92,6 +100,40 @@ async fn main() -> anyhow::Result<()> {
                 println!("OK: {total_policies} policies in {} file(s)", reports.len());
             } else {
                 std::process::exit(1);
+            }
+        }
+        Cmd::Healthcheck { config } => {
+            let cfg = match Config::load(&config) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("FAILED: {e}");
+                    std::process::exit(1);
+                }
+            };
+            // Always loopback: this only ever runs inside the same
+            // container/host as the gateway it's checking, regardless of
+            // what address the gateway itself is configured to bind.
+            let url = format!("http://127.0.0.1:{}/healthz", cfg.listen.port());
+            let client = match reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("FAILED: {e}");
+                    std::process::exit(1);
+                }
+            };
+            match client.get(&url).send().await {
+                Ok(r) if r.status().is_success() => println!("OK: {url}"),
+                Ok(r) => {
+                    eprintln!("FAILED: {url} returned {}", r.status());
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("FAILED: {url}: {e}");
+                    std::process::exit(1);
+                }
             }
         }
     }

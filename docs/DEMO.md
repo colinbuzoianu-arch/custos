@@ -2,11 +2,37 @@
 
 This walks a real MCP server (the official reference "everything" server)
 through Custos, with one tool allowed, one explicitly forbidden, and one
-blocked by default deny. It needs three terminals open at once, all from the
-repo root (`custos/`).
+blocked by default deny. Two ways to run it: Docker (below, fastest) or
+three terminals with `cargo run` (further down, better for reading logs live
+and poking at the code).
 
-Prerequisites: Node.js (for `npx`), Rust (`cargo test --workspace` already
-passing).
+## Docker in 2 commands
+
+Prerequisites: Docker with Compose.
+
+```bash
+cp .env.example .env
+docker compose up
+```
+
+That builds the gateway image, starts the "everything" server (not exposed
+outside the compose network — only Custos can reach it) and Custos itself,
+reachable at `http://127.0.0.1:8787/mcp` with the same demo token as below
+(`custos-demo-token`). The audit log lands in the `custos-data` named
+volume; `docker compose exec custos custos verify-audit
+/var/lib/custos/audit.jsonl` checks it. `docker compose down` stops
+everything; add `-v` to also drop the volume.
+
+This uses `config/custos.docker.toml` (`audit_arguments = "redacted"`, no
+signing key needed) rather than the config you'd hand-build below — see that
+file's comments, and `config/custos.example.toml`, for the production
+`"hash"` mode.
+
+## cargo run, three terminals
+
+This walks the same scenario by hand: Node.js (for `npx`) and Rust
+(`cargo test --workspace` already passing), all from the repo root
+(`custos/`).
 
 ## 1. Create the local config
 

@@ -1,0 +1,22 @@
+# Used by docker-compose.yml — bind-mounted read-only into the container at
+# /etc/custos/custos.toml. Not the file you edit for a local `cargo run`
+# setup; see config/custos.example.toml for that.
+
+listen = "0.0.0.0:8787"
+
+# "everything" is the other compose service; containers reach each other by
+# service name on the compose network.
+upstream = "http://everything:3001/mcp"
+
+policy_dir = "/etc/custos/policies"
+audit_log = "/var/lib/custos/audit.jsonl"
+
+# Keeps the demo simple (no signing key to generate). Production should use
+# the default "hash" mode instead — see config/custos.example.toml.
+audit_arguments = "redacted"
+
+# Same demo token as docs/DEMO.md: custos-demo-token
+[[agents]]
+id = "demo-agent"
+owner = "colin"
+token_sha256 = "198fa9f6c41121a815dbef3eb5acb40fe4182e6d29f91b2947dcd5e7e60ce439"
