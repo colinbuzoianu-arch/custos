@@ -7,6 +7,7 @@
 //! for why this crate — unlike the rest of the workspace — isn't Apache-2.0.
 
 pub mod agents;
+pub mod approvals;
 pub mod audit;
 pub mod config;
 pub mod gateways;
@@ -28,7 +29,7 @@ use ed25519_dalek::SigningKey;
 use gateways::{GatewayAuth, GatewaysError};
 use policies::PoliciesError;
 use serde::Deserialize;
-use sessions::{AdminUser, CurrentUser, LoginError, RateLimiter};
+use sessions::{AdminUser, ApproverUser, CurrentUser, LoginError, RateLimiter};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -103,6 +104,14 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/gateways/bundle", get(gateway_bundle_handler))
         .route("/gateways/heartbeat", post(heartbeat_handler))
         .route("/gateways/audit/batch", post(ingest_audit_batch_handler))
+        .route("/gateways/approvals", post(create_approval_handler))
+        .route(
+            "/gateways/approvals/{id}",
+            get(get_approval_for_gateway_handler),
+        )
+        .route("/approvals", get(list_pending_approvals_handler))
+        .route("/approvals/{id}/approve", post(approve_handler))
+        .route("/approvals/{id}/reject", post(reject_handler))
         .route("/audit", get(search_audit_handler))
         .route("/audit/stream", get(audit_stream_handler))
         .route("/overview", get(overview_handler))
@@ -698,6 +707,138 @@ async fn ingest_audit_batch_handler(
         }
         Err(e) => audit_error_response(e),
     }
+}
+
+fn approvals_error_response(e: approvals::ApprovalsError) -> axum::response::Response {
+    match e {
+        approvals::ApprovalsError::NotFound => StatusCode::NOT_FOUND.into_response(),
+        approvals::ApprovalsError::AlreadyResolved => StatusCode::CONFLICT.into_response(),
+        approvals::ApprovalsError::FourEyesViolation => StatusCode::FORBIDDEN.into_response(),
+        approvals::ApprovalsError::Db(e) => {
+            tracing::error!(error = %e, "approvals db error");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateApprovalRequest {
+    agent: String,
+    tool: String,
+    findings: Option<serde_json::Value>,
+    reason: String,
+    #[serde(default)]
+    four_eyes: bool,
+}
+
+async fn create_approval_handler(
+    State(state): State<Arc<AppState>>,
+    auth: GatewayAuth,
+    Json(req): Json<CreateApprovalRequest>,
+) -> impl IntoResponse {
+    match approvals::create(
+        &state.db,
+        auth.tenant_id,
+        approvals::NewApproval {
+            gateway_id: auth.gateway_id,
+            agent: &req.agent,
+            tool: &req.tool,
+            findings: req.findings.as_ref(),
+            reason: &req.reason,
+            four_eyes: req.four_eyes,
+        },
+    )
+    .await
+    {
+        Ok(approval) => (StatusCode::CREATED, Json(approval)).into_response(),
+        Err(e) => approvals_error_response(e),
+    }
+}
+
+async fn get_approval_for_gateway_handler(
+    State(state): State<Arc<AppState>>,
+    auth: GatewayAuth,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    match approvals::get_for_gateway(&state.db, auth.tenant_id, auth.gateway_id, id).await {
+        Ok(approval) => Json(approval).into_response(),
+        Err(e) => approvals_error_response(e),
+    }
+}
+
+async fn list_pending_approvals_handler(
+    State(state): State<Arc<AppState>>,
+    ApproverUser(user): ApproverUser,
+) -> impl IntoResponse {
+    match approvals::list_pending(&state.db, user.tenant_id).await {
+        Ok(list) => Json(list).into_response(),
+        Err(e) => approvals_error_response(e),
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct ResolveApprovalRequest {
+    comment: Option<String>,
+}
+
+async fn resolve_approval(
+    state: &Arc<AppState>,
+    user: &CurrentUser,
+    id: Uuid,
+    approve: bool,
+    comment: Option<&str>,
+) -> axum::response::Response {
+    match approvals::resolve(
+        &state.db,
+        user.tenant_id,
+        id,
+        user.user_id,
+        approve,
+        comment,
+    )
+    .await
+    {
+        Ok(approval) => {
+            agents::record_admin_audit(
+                &state.db,
+                user.tenant_id,
+                user.user_id,
+                if approve { "approve" } else { "reject" },
+                "approval",
+                Some(approval.id),
+                comment.map(|c| serde_json::json!({ "comment": c })),
+            )
+            .await;
+            Json(approval).into_response()
+        }
+        Err(e) => approvals_error_response(e),
+    }
+}
+
+async fn approve_handler(
+    State(state): State<Arc<AppState>>,
+    ApproverUser(user): ApproverUser,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ResolveApprovalRequest>,
+) -> impl IntoResponse {
+    if let Err(status) = user.check_csrf(&headers) {
+        return status.into_response();
+    }
+    resolve_approval(&state, &user, id, true, req.comment.as_deref()).await
+}
+
+async fn reject_handler(
+    State(state): State<Arc<AppState>>,
+    ApproverUser(user): ApproverUser,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ResolveApprovalRequest>,
+) -> impl IntoResponse {
+    if let Err(status) = user.check_csrf(&headers) {
+        return status.into_response();
+    }
+    resolve_approval(&state, &user, id, false, req.comment.as_deref()).await
 }
 
 #[derive(Deserialize)]

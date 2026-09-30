@@ -298,6 +298,27 @@ impl FromRequestParts<std::sync::Arc<AppState>> for AdminUser {
     }
 }
 
+/// Same as [`CurrentUser`], but rejects with `403 Forbidden` for anyone
+/// whose role isn't `approver` or `admin` — the two roles the plan allows
+/// to resolve a held call.
+pub struct ApproverUser(pub CurrentUser);
+
+impl FromRequestParts<std::sync::Arc<AppState>> for ApproverUser {
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &std::sync::Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let user = CurrentUser::from_request_parts(parts, state).await?;
+        if matches!(user.role, Role::Admin | Role::Approver) {
+            Ok(ApproverUser(user))
+        } else {
+            Err(StatusCode::FORBIDDEN)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
