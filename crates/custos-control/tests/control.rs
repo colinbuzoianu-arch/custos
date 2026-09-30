@@ -8,6 +8,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use custos_control::agents::{self, AgentPatch, AgentsError, Status};
+use custos_control::gateways::{self, GatewaysError};
 use custos_control::policies::{self, PoliciesError};
 use custos_control::sessions::{self, RateLimiter, SESSION_COOKIE};
 use custos_control::users::{self, Role};
@@ -483,4 +484,226 @@ async fn diff_shows_the_change_between_two_versions() {
     };
     assert!(diff.contains("-permit (principal, action, resource == Tool::\"a\");"));
     assert!(diff.contains("+permit (principal, action, resource == Tool::\"b\");"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn enroll_token_is_single_use() {
+    let f = fixture(Role::Admin).await;
+    let token = match gateways::create_enroll_token(
+        &f.db,
+        f.tenant_id,
+        f.user_id,
+        time::Duration::hours(1),
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => panic!("{e}"),
+    };
+
+    let enrolled = match gateways::enroll(&f.db, &token, "gw-one").await {
+        Ok(e) => e,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(enrolled.tenant_id, f.tenant_id);
+
+    let second = gateways::enroll(&f.db, &token, "gw-two").await;
+    assert!(matches!(second, Err(GatewaysError::InvalidEnrollToken)));
+}
+
+#[tokio::test]
+#[ignore]
+async fn enroll_rejects_an_unknown_token() {
+    let f = fixture(Role::Admin).await;
+    let result = gateways::enroll(&f.db, "not-a-real-token", "gw").await;
+    assert!(matches!(result, Err(GatewaysError::InvalidEnrollToken)));
+}
+
+#[tokio::test]
+#[ignore]
+async fn gateway_bundle_endpoint_authenticates_by_credential() {
+    let f = fixture(Role::Admin).await;
+    let token = match gateways::create_enroll_token(
+        &f.db,
+        f.tenant_id,
+        f.user_id,
+        time::Duration::hours(1),
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => panic!("{e}"),
+    };
+    let enrolled = match gateways::enroll(&f.db, &token, "gw-auth").await {
+        Ok(e) => e,
+        Err(e) => panic!("{e}"),
+    };
+
+    let state = test_state(f.db);
+
+    // No bundle published yet, but a valid credential still gets past auth
+    // (404, not 401).
+    let request = match Request::builder()
+        .uri("/gateways/bundle")
+        .header("authorization", format!("Bearer {}", enrolled.credential))
+        .body(Body::empty())
+    {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    let response = match app(state.clone()).oneshot(request).await {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let bad_request = match Request::builder()
+        .uri("/gateways/bundle")
+        .header("authorization", "Bearer wrong-credential")
+        .body(Body::empty())
+    {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    let bad_response = match app(state).oneshot(bad_request).await {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(bad_response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+#[ignore]
+async fn gateway_bundle_endpoint_returns_304_when_etag_matches() {
+    let f = fixture(Role::Admin).await;
+    let saved = match policies::save_draft(
+        &f.db,
+        f.tenant_id,
+        f.user_id,
+        r#"permit (principal, action, resource == Tool::"echo");"#,
+        None,
+        None,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => panic!("{e}"),
+    };
+    let key = SigningKey::from_bytes(&[4u8; 32]);
+    if let Err(e) = policies::publish(&f.db, f.tenant_id, saved.version, &key).await {
+        panic!("{e}");
+    }
+
+    let token = match gateways::create_enroll_token(
+        &f.db,
+        f.tenant_id,
+        f.user_id,
+        time::Duration::hours(1),
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => panic!("{e}"),
+    };
+    let enrolled = match gateways::enroll(&f.db, &token, "gw-etag").await {
+        Ok(e) => e,
+        Err(e) => panic!("{e}"),
+    };
+
+    let state = test_state(f.db);
+    let auth_header = format!("Bearer {}", enrolled.credential);
+
+    let first = match Request::builder()
+        .uri("/gateways/bundle")
+        .header("authorization", &auth_header)
+        .body(Body::empty())
+    {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    let first_response = match app(state.clone()).oneshot(first).await {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(first_response.status(), StatusCode::OK);
+    let etag = match first_response.headers().get("etag") {
+        Some(v) => match v.to_str() {
+            Ok(s) => s.to_string(),
+            Err(e) => panic!("{e}"),
+        },
+        None => panic!("expected an ETag header"),
+    };
+
+    let second = match Request::builder()
+        .uri("/gateways/bundle")
+        .header("authorization", &auth_header)
+        .header("if-none-match", &etag)
+        .body(Body::empty())
+    {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    let second_response = match app(state).oneshot(second).await {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(second_response.status(), StatusCode::NOT_MODIFIED);
+}
+
+#[tokio::test]
+#[ignore]
+async fn heartbeat_updates_the_gateway_row() {
+    let f = fixture(Role::Admin).await;
+    let token = match gateways::create_enroll_token(
+        &f.db,
+        f.tenant_id,
+        f.user_id,
+        time::Duration::hours(1),
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => panic!("{e}"),
+    };
+    let enrolled = match gateways::enroll(&f.db, &token, "gw-heartbeat").await {
+        Ok(e) => e,
+        Err(e) => panic!("{e}"),
+    };
+
+    let state = test_state(f.db);
+    let body = serde_json::json!({
+        "version": "0.1.0",
+        "policy_version": "abc123",
+        "decisions_allowed": 10,
+        "decisions_blocked": 2,
+    });
+    let request = match Request::builder()
+        .method("POST")
+        .uri("/gateways/heartbeat")
+        .header("authorization", format!("Bearer {}", enrolled.credential))
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+    {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    let response = match app(state.clone()).oneshot(request).await {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let list = match gateways::list_gateways(&state.db, f.tenant_id).await {
+        Ok(l) => l,
+        Err(e) => panic!("{e}"),
+    };
+    let gw = list
+        .iter()
+        .find(|g| g.id == enrolled.gateway_id)
+        .unwrap_or_else(|| panic!("gateway must be in the list"));
+    assert_eq!(gw.decisions_allowed, 10);
+    assert_eq!(gw.decisions_blocked, 2);
+    assert_eq!(gw.last_version.as_deref(), Some("0.1.0"));
+    assert!(gw.last_heartbeat_at.is_some());
 }

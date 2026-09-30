@@ -205,7 +205,7 @@ pub async fn delete_agent(pool: &PgPool, tenant_id: Uuid, id: Uuid) -> Result<()
 /// A fresh, unguessable token: two random UUID v4s concatenated (244 bits
 /// of randomness between them) rather than pulling in a CSPRNG crate
 /// directly for this alone.
-fn generate_token() -> String {
+pub(crate) fn generate_token() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 

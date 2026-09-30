@@ -29,7 +29,6 @@ cedar-policy.workspace = true
 custos-policy.workspace = true
 custos-tokens.workspace = true
 ed25519-dalek.workspace = true
-base64.workspace = true
 similar.workspace = true
 clap.workspace = true
 tracing.workspace = true

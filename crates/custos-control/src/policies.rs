@@ -5,10 +5,11 @@
 //! See `docs/decisions/0003-policy-bundle.md` for why the bundle is shaped
 //! and signed the way it is.
 
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use serde::{Deserialize, Serialize};
+pub use custos_policy::bundle::{BundleAgent, PolicyBundle, SignedBundle, verify_bundle};
+
+use custos_policy::bundle::BundleError;
+use ed25519_dalek::SigningKey;
+use serde::Serialize;
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -21,12 +22,8 @@ pub enum PoliciesError {
     NotFound,
     #[error("this version failed validation and cannot be published: {0}")]
     Invalid(String),
-    #[error("could not serialize the policy bundle: {0}")]
-    Serialize(#[from] serde_json::Error),
-    #[error("malformed signed bundle: {0}")]
-    MalformedBundle(String),
-    #[error("bundle signature does not verify")]
-    BadSignature,
+    #[error(transparent)]
+    Bundle(#[from] BundleError),
 }
 
 #[derive(Debug, Serialize)]
@@ -171,42 +168,6 @@ pub async fn diff_versions(
         .to_string())
 }
 
-/// One agent's identity inside a published bundle: enough for a gateway to
-/// recognize the agent and check its token, never anything else about it.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct BundleAgent {
-    pub id: Uuid,
-    pub name: String,
-    pub token_sha256: Option<String>,
-}
-
-/// What gets signed on publish: the exact policy and schema text of one
-/// version, plus a snapshot of every active agent's identity and token
-/// hash, so a gateway that applies this bundle knows both the rules and
-/// who they apply to as of the moment it was published.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PolicyBundle {
-    pub tenant_id: Uuid,
-    pub version: i32,
-    pub policy: String,
-    pub schema: Option<String>,
-    pub agents: Vec<BundleAgent>,
-    #[serde(with = "time::serde::rfc3339")]
-    pub published_at: OffsetDateTime,
-}
-
-/// The wire format: the exact bytes that were signed, kept verbatim as a
-/// JSON string, plus the signature over those bytes. Verification never
-/// re-serializes `bundle` to recover what was signed — `serde_json::Value`
-/// doesn't preserve field order the same way twice, so re-encoding it could
-/// produce different bytes than what was actually signed. Keeping the
-/// signed bytes themselves avoids that trap entirely.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SignedBundle {
-    pub bundle_json: String,
-    pub signature: String,
-}
-
 /// Publishes `version`: it must already be valid (from [`save_draft`]'s
 /// check), never re-validated here so publish can't silently pass something
 /// that would fail if checked again with a since-changed schema. Builds the
@@ -250,18 +211,17 @@ pub async fn publish(
         agents,
         published_at: OffsetDateTime::now_utc(),
     };
-    let bundle_json = serde_json::to_string(&bundle)?;
-    let signature = signing_key.sign(bundle_json.as_bytes());
-    let signed = SignedBundle {
-        bundle_json,
-        signature: URL_SAFE_NO_PAD.encode(signature.to_bytes()),
-    };
+    let signed = custos_policy::bundle::sign_bundle(&bundle, signing_key)?;
 
     sqlx::query(
-        "update policy_versions set published = true, published_at = now() where tenant_id = $1 and version = $2",
+        "update policy_versions
+         set published = true, published_at = now(), bundle_json = $3, bundle_signature = $4
+         where tenant_id = $1 and version = $2",
     )
     .bind(tenant_id)
     .bind(version)
+    .bind(&signed.bundle_json)
+    .bind(&signed.signature)
     .execute(pool)
     .await?;
 
@@ -269,94 +229,35 @@ pub async fn publish(
     Ok((updated, signed))
 }
 
-/// Verifies a [`SignedBundle`] against `verifying_key`, returning the
-/// bundle it carries only once the signature over its exact bytes checks
-/// out. A single flipped byte anywhere in `bundle_json` fails this, since
-/// the signature covers that string byte-for-byte.
-pub fn verify_bundle(
-    signed: &SignedBundle,
-    verifying_key: &VerifyingKey,
-) -> Result<PolicyBundle, PoliciesError> {
-    let sig_bytes: [u8; 64] = URL_SAFE_NO_PAD
-        .decode(&signed.signature)
-        .map_err(|e| PoliciesError::MalformedBundle(e.to_string()))?
-        .try_into()
-        .map_err(|_| PoliciesError::MalformedBundle("signature must be 64 bytes".into()))?;
-    let signature = Signature::from_bytes(&sig_bytes);
-    verifying_key
-        .verify(signed.bundle_json.as_bytes(), &signature)
-        .map_err(|_| PoliciesError::BadSignature)?;
-    let bundle: PolicyBundle = serde_json::from_str(&signed.bundle_json)?;
-    Ok(bundle)
+/// The most recently published version's frozen bundle, if the tenant has
+/// published anything at all. Never regenerated — this is exactly the
+/// bytes [`publish`] signed, byte for byte.
+pub async fn latest_published_bundle(
+    pool: &PgPool,
+    tenant_id: Uuid,
+) -> Result<Option<(i32, SignedBundle)>, PoliciesError> {
+    let row: Option<(i32, String, String)> = sqlx::query_as(
+        "select version, bundle_json, bundle_signature from policy_versions
+         where tenant_id = $1 and published = true
+         order by version desc
+         limit 1",
+    )
+    .bind(tenant_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(version, bundle_json, signature)| {
+        (
+            version,
+            SignedBundle {
+                bundle_json,
+                signature,
+            },
+        )
+    }))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    fn signing_key() -> SigningKey {
-        SigningKey::from_bytes(&[7u8; 32])
-    }
-
-    fn sample_bundle() -> PolicyBundle {
-        PolicyBundle {
-            tenant_id: Uuid::new_v4(),
-            version: 1,
-            policy: "permit(principal, action, resource);".into(),
-            schema: None,
-            agents: vec![BundleAgent {
-                id: Uuid::new_v4(),
-                name: "agent-a".into(),
-                token_sha256: Some("abc123".into()),
-            }],
-            published_at: OffsetDateTime::now_utc(),
-        }
-    }
-
-    fn sign(bundle: &PolicyBundle, key: &SigningKey) -> SignedBundle {
-        let bundle_json = match serde_json::to_string(bundle) {
-            Ok(s) => s,
-            Err(e) => panic!("{e}"),
-        };
-        let signature = key.sign(bundle_json.as_bytes());
-        SignedBundle {
-            bundle_json,
-            signature: URL_SAFE_NO_PAD.encode(signature.to_bytes()),
-        }
-    }
-
-    #[test]
-    fn a_correctly_signed_bundle_verifies() {
-        let key = signing_key();
-        let signed = sign(&sample_bundle(), &key);
-        let verified = match verify_bundle(&signed, &key.verifying_key()) {
-            Ok(b) => b,
-            Err(e) => panic!("{e}"),
-        };
-        assert_eq!(verified.version, 1);
-        assert_eq!(verified.agents.len(), 1);
-    }
-
-    #[test]
-    fn a_tampered_bundle_fails_verification() {
-        let key = signing_key();
-        let mut signed = sign(&sample_bundle(), &key);
-        // Flip one character inside the signed JSON without re-signing -
-        // simulates an attacker (or a bug) modifying the bundle in transit.
-        signed.bundle_json = signed.bundle_json.replace("agent-a", "agent-b");
-        let result = verify_bundle(&signed, &key.verifying_key());
-        assert!(matches!(result, Err(PoliciesError::BadSignature)));
-    }
-
-    #[test]
-    fn a_bundle_signed_by_a_different_key_fails_verification() {
-        let key = signing_key();
-        let other_key = SigningKey::from_bytes(&[9u8; 32]);
-        let signed = sign(&sample_bundle(), &key);
-        let result = verify_bundle(&signed, &other_key.verifying_key());
-        assert!(matches!(result, Err(PoliciesError::BadSignature)));
-    }
-
     #[test]
     fn diff_output_shows_added_and_removed_lines() {
         let from = "permit(principal, action, resource == Tool::\"a\");\n";

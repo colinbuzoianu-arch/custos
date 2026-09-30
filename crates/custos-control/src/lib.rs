@@ -8,13 +8,14 @@
 
 pub mod agents;
 pub mod config;
+pub mod gateways;
 pub mod policies;
 pub mod sessions;
 pub mod users;
 
 use agents::{AgentPatch, AgentsError, Status};
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::{
     Json, Router,
@@ -22,6 +23,7 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use ed25519_dalek::SigningKey;
+use gateways::{GatewayAuth, GatewaysError};
 use policies::PoliciesError;
 use serde::Deserialize;
 use sessions::{AdminUser, CurrentUser, LoginError, RateLimiter};
@@ -79,6 +81,11 @@ pub fn app(state: Arc<AppState>) -> Router {
             "/policies/{version}/publish",
             post(publish_policy_version_handler),
         )
+        .route("/enroll", post(enroll_handler))
+        .route("/gateways/enroll-tokens", post(create_enroll_token_handler))
+        .route("/gateways", get(list_gateways_handler))
+        .route("/gateways/bundle", get(gateway_bundle_handler))
+        .route("/gateways/heartbeat", post(heartbeat_handler))
         .with_state(state)
 }
 
@@ -353,13 +360,8 @@ fn policies_error_response(e: PoliciesError) -> axum::response::Response {
             tracing::error!(error = %e, "policies db error");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
-        PoliciesError::Serialize(e) => {
-            tracing::error!(error = %e, "failed to serialize policy bundle");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-        PoliciesError::MalformedBundle(_) | PoliciesError::BadSignature => {
-            // Only reachable via `verify_bundle`, which this crate's own
-            // handlers never call on a bundle they just produced themselves.
+        PoliciesError::Bundle(e) => {
+            tracing::error!(error = %e, "failed to build policy bundle");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
@@ -477,6 +479,133 @@ async fn publish_policy_version_handler(
             Json(signed).into_response()
         }
         Err(e) => policies_error_response(e),
+    }
+}
+
+fn gateways_error_response(e: GatewaysError) -> axum::response::Response {
+    match e {
+        GatewaysError::NotFound => StatusCode::NOT_FOUND.into_response(),
+        GatewaysError::InvalidEnrollToken => StatusCode::UNAUTHORIZED.into_response(),
+        GatewaysError::NameTaken(_) => StatusCode::CONFLICT.into_response(),
+        GatewaysError::Db(e) => {
+            tracing::error!(error = %e, "gateways db error");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// How long a `custos enroll` token stays usable before it must be reissued.
+const ENROLL_TOKEN_TTL: time::Duration = time::Duration::hours(1);
+
+async fn create_enroll_token_handler(
+    State(state): State<Arc<AppState>>,
+    AdminUser(user): AdminUser,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(status) = user.check_csrf(&headers) {
+        return status.into_response();
+    }
+    match gateways::create_enroll_token(&state.db, user.tenant_id, user.user_id, ENROLL_TOKEN_TTL)
+        .await
+    {
+        Ok(token) => {
+            agents::record_admin_audit(
+                &state.db,
+                user.tenant_id,
+                user.user_id,
+                "create_enroll_token",
+                "gateway",
+                None,
+                None,
+            )
+            .await;
+            Json(serde_json::json!({ "token": token })).into_response()
+        }
+        Err(e) => gateways_error_response(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct EnrollRequest {
+    token: String,
+    name: String,
+}
+
+async fn enroll_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<EnrollRequest>,
+) -> impl IntoResponse {
+    match gateways::enroll(&state.db, &req.token, &req.name).await {
+        Ok(enrolled) => {
+            let control_public_key =
+                hex::encode(state.policy_signing_key.verifying_key().to_bytes());
+            Json(serde_json::json!({
+                "gateway_id": enrolled.gateway_id,
+                "credential": enrolled.credential,
+                "control_public_key": control_public_key,
+            }))
+            .into_response()
+        }
+        Err(e) => gateways_error_response(e),
+    }
+}
+
+async fn list_gateways_handler(
+    State(state): State<Arc<AppState>>,
+    AdminUser(user): AdminUser,
+) -> impl IntoResponse {
+    match gateways::list_gateways(&state.db, user.tenant_id).await {
+        Ok(list) => Json(list).into_response(),
+        Err(e) => gateways_error_response(e),
+    }
+}
+
+async fn gateway_bundle_handler(
+    State(state): State<Arc<AppState>>,
+    auth: GatewayAuth,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    match policies::latest_published_bundle(&state.db, auth.tenant_id).await {
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Ok(Some((version, signed))) => {
+            let etag = version.to_string();
+            let if_none_match = headers
+                .get(header::IF_NONE_MATCH)
+                .and_then(|v| v.to_str().ok());
+            if if_none_match == Some(etag.as_str()) {
+                return StatusCode::NOT_MODIFIED.into_response();
+            }
+            (StatusCode::OK, [(header::ETAG, etag)], Json(signed)).into_response()
+        }
+        Err(e) => policies_error_response(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct HeartbeatRequest {
+    version: String,
+    policy_version: Option<String>,
+    decisions_allowed: i64,
+    decisions_blocked: i64,
+}
+
+async fn heartbeat_handler(
+    State(state): State<Arc<AppState>>,
+    auth: GatewayAuth,
+    Json(req): Json<HeartbeatRequest>,
+) -> impl IntoResponse {
+    match gateways::record_heartbeat(
+        &state.db,
+        auth.gateway_id,
+        &req.version,
+        req.policy_version.as_deref(),
+        req.decisions_allowed,
+        req.decisions_blocked,
+    )
+    .await
+    {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(e) => gateways_error_response(e),
     }
 }
 

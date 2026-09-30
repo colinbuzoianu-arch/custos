@@ -9,6 +9,8 @@
 //! `forbid` matches. Every decision carries the ids of the policies that
 //! decided it, so the audit log can say *why*.
 
+pub mod bundle;
+
 use arc_swap::ArcSwap;
 use cedar_policy::{
     Authorizer, Context, Decision as CedarDecision, Entities, EntityUid, PolicySet, Request,

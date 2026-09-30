@@ -680,7 +680,6 @@ dependencies = [
  "argon2",
  "axum",
  "axum-extra",
- "base64 0.22.1",
  "cedar-policy",
  "clap",
  "custos-policy",
@@ -752,16 +751,20 @@ name = "custos-policy"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "base64 0.22.1",
  "cedar-policy",
  "custos-core",
  "custos-inspect",
+ "ed25519-dalek",
  "hex",
  "miette",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "thiserror",
  "time",
+ "uuid",
 ]
 
 [[package]]
