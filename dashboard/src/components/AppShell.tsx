@@ -29,6 +29,9 @@ export function AppShell() {
           <NavLink to="/live">{t('nav.live')}</NavLink>
           <NavLink to="/audit">{t('nav.audit')}</NavLink>
           {auth?.role === 'admin' && <NavLink to="/policies">{t('nav.policies')}</NavLink>}
+          {(auth?.role === 'admin' || auth?.role === 'approver') && (
+            <NavLink to="/approvals">{t('nav.approvals')}</NavLink>
+          )}
           <label>
             <span className="visually-hidden">Language</span>
             <select

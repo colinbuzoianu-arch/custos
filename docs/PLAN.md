@@ -178,10 +178,10 @@ Each session = one branch/commit, `/check` green, `/security-review` before comm
       default 120s). Approved → forward. Rejected or timeout → block. Control unreachable →
       block. Every step audited. (Gateway polls Control every `approval_poll_interval_secs`
       rather than a true server-side long-poll — see docs/decisions/0008-hold-and-approval.md.)
-- [ ] Approvals page: pending queue, agent/tool/findings (never raw arguments unless audit
-      mode allows), approve/reject with comment, only `approver`/`admin` roles. API done
-      (GET /api/approvals, POST /api/approvals/{id}/approve|reject); dashboard page is the
-      remaining follow-up.
+- [x] Approvals page: pending queue, agent/tool/findings (never raw arguments unless audit
+      mode allows — findings only, matching the audit log's own guarantee), approve/reject
+      with comment, nav link and page both gated to `approver`/`admin` client-side (server
+      already enforces this via `ApproverUser`).
 - [x] The approver can't be the agent's owner if the policy carries `@four_eyes`.
 - Tests: approve ✓, reject ✓, timeout ✓, Control down ✓, wrong role ✓.
 

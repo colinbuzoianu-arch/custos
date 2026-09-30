@@ -8,6 +8,7 @@
     "live": "Live",
     "audit": "Audit",
     "policies": "Richtlinien",
+    "approvals": "Freigaben",
     "logout": "Abmelden"
   },
   "login": {
@@ -95,6 +96,17 @@
     "to": "Bis",
     "showDiff": "Unterschied anzeigen",
     "adminOnly": "Nur Administratoren können Richtlinien verwalten."
+  },
+  "approvals": {
+    "heading": "Ausstehende Freigaben",
+    "noPending": "Nichts wartet auf Freigabe.",
+    "findings": "Befunde",
+    "comment": "Kommentar",
+    "approve": "Genehmigen",
+    "reject": "Ablehnen",
+    "fourEyes": "Vier-Augen-Prinzip",
+    "fourEyesHint": "Der Verantwortliche dieses Agenten kann dies nicht freigeben.",
+    "fourEyesError": "Sie können dies nicht freigeben — Sie sind der Verantwortliche dieses Agenten, und es ist ein anderer Freigeber erforderlich."
   },
   "common": {
     "loading": "Wird geladen…",

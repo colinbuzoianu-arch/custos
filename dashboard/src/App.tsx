@@ -6,6 +6,7 @@ import { AuthProvider } from './auth/AuthContext'
 import { AgentCreatePage } from './pages/AgentCreatePage'
 import { AgentDetailPage } from './pages/AgentDetailPage'
 import { AgentsPage } from './pages/AgentsPage'
+import { ApprovalsPage } from './pages/ApprovalsPage'
 import { AuditSearchPage } from './pages/AuditSearchPage'
 import { LiveDecisionsPage } from './pages/LiveDecisionsPage'
 import { LoginPage } from './pages/LoginPage'
@@ -31,6 +32,7 @@ export function App() {
           <Route path="/live" element={<LiveDecisionsPage />} />
           <Route path="/audit" element={<AuditSearchPage />} />
           <Route path="/policies" element={<PoliciesPage />} />
+          <Route path="/approvals" element={<ApprovalsPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/overview" replace />} />
       </Routes>

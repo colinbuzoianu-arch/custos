@@ -1,5 +1,6 @@
 import type {
   Agent,
+  Approval,
   AuditSearchFilters,
   AuditSearchResult,
   CreateAgentInput,
@@ -165,5 +166,23 @@ export const api = {
 
   searchAudit(filters: AuditSearchFilters): Promise<AuditSearchResult> {
     return request<AuditSearchResult>(`/audit${toQueryString({ ...filters })}`)
+  },
+
+  listPendingApprovals(): Promise<Approval[]> {
+    return request<Approval[]>('/approvals')
+  },
+
+  approveApproval(id: string, comment?: string): Promise<Approval> {
+    return request<Approval>(`/approvals/${id}/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ comment: comment || null }),
+    })
+  },
+
+  rejectApproval(id: string, comment?: string): Promise<Approval> {
+    return request<Approval>(`/approvals/${id}/reject`, {
+      method: 'POST',
+      body: JSON.stringify({ comment: comment || null }),
+    })
   },
 }

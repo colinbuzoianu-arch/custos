@@ -136,3 +136,18 @@ export interface AuditSearchFilters {
   cursor?: string
   limit?: number
 }
+
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected'
+
+export interface Approval {
+  id: string
+  gateway_id: string
+  agent: string
+  tool: string
+  findings: unknown
+  reason: string
+  four_eyes: boolean
+  status: ApprovalStatus
+  comment: string | null
+  created_at: string
+}

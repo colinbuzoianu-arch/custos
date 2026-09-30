@@ -8,6 +8,7 @@
     "live": "Live",
     "audit": "Audit",
     "policies": "Politici",
+    "approvals": "Aprobări",
     "logout": "Deconectare"
   },
   "login": {
@@ -95,6 +96,17 @@
     "to": "Până la",
     "showDiff": "Arată diferența",
     "adminOnly": "Doar administratorii pot gestiona politicile."
+  },
+  "approvals": {
+    "heading": "Aprobări în așteptare",
+    "noPending": "Nimic în așteptarea aprobării.",
+    "findings": "Constatări",
+    "comment": "Comentariu",
+    "approve": "Aprobă",
+    "reject": "Respinge",
+    "fourEyes": "patru ochi",
+    "fourEyesHint": "Responsabilul acestui agent nu poate rezolva aceasta.",
+    "fourEyesError": "Nu puteți rezolva aceasta — sunteți responsabilul acestui agent și este necesar un alt aprobator."
   },
   "common": {
     "loading": "Se încarcă…",
