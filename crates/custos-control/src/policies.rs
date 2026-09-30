@@ -79,6 +79,16 @@ fn row_to_version(row: PolicyVersionRow) -> PolicyVersion {
 
 const VERSION_COLUMNS: &str = "id, version, policy_text, schema_text, message, valid, validation_error, published, created_at";
 
+/// `Some(reason)` if `policy_text` (and, if given, `schema_text`) fails to
+/// parse or type-check, `None` if it's valid. Pure and DB-free — used both
+/// by [`save_draft`] and by a dashboard "validate as you type" endpoint
+/// that must never insert a row per keystroke.
+pub fn validate(policy_text: &str, schema_text: Option<&str>) -> Option<String> {
+    custos_policy::validate_source(policy_text, schema_text)
+        .err()
+        .map(|e| e.to_string())
+}
+
 /// Validates `policy_text` (and, if given, `schema_text`) and saves it as
 /// the next version for `tenant_id` — an invalid draft is still saved
 /// (with `valid = false` and the reason recorded), it just can't be
@@ -95,9 +105,7 @@ pub async fn save_draft(
     schema_text: Option<&str>,
     message: Option<&str>,
 ) -> Result<PolicyVersion, PoliciesError> {
-    let validation_error = custos_policy::validate_source(policy_text, schema_text)
-        .err()
-        .map(|e| e.to_string());
+    let validation_error = validate(policy_text, schema_text);
     let valid = validation_error.is_none();
 
     let sql = format!(
@@ -258,6 +266,24 @@ pub async fn latest_published_bundle(
 
 #[cfg(test)]
 mod tests {
+    use super::validate;
+
+    #[test]
+    fn validate_accepts_well_formed_cedar() {
+        assert!(
+            validate(
+                r#"permit (principal, action, resource == Tool::"echo");"#,
+                None
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn validate_rejects_garbage_without_saving_anything() {
+        assert!(validate("this is not cedar at all", None).is_some());
+    }
+
     #[test]
     fn diff_output_shows_added_and_removed_lines() {
         let from = "permit(principal, action, resource == Tool::\"a\");\n";

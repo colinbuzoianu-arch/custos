@@ -1111,3 +1111,48 @@ async fn me_requires_a_session_and_returns_role_and_csrf_token() {
     };
     assert_eq!(authed_response.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+#[ignore]
+async fn validate_endpoint_never_creates_a_version_row() {
+    let f = fixture(Role::Admin).await;
+    let limiter = RateLimiter::default();
+    let logged_in =
+        match sessions::login(&f.db, &limiter, &f.tenant_slug, &f.email, f.password).await {
+            Ok(l) => l,
+            Err(e) => panic!("{e}"),
+        };
+    let state = test_state(f.db);
+
+    let body = serde_json::json!({ "policy_text": "this is not cedar at all" });
+    let request = match Request::builder()
+        .method("POST")
+        .uri("/api/policies/validate")
+        .header(
+            "cookie",
+            format!("{SESSION_COOKIE}={}", logged_in.session_id),
+        )
+        .header("x-csrf-token", &logged_in.csrf_token)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+    {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    let response = match app(state.clone()).oneshot(request).await {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let count: (i64,) =
+        match sqlx::query_as("select count(*) from policy_versions where tenant_id = $1")
+            .bind(f.tenant_id)
+            .fetch_one(&state.db)
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => panic!("{e}"),
+        };
+    assert_eq!(count.0, 0);
+}

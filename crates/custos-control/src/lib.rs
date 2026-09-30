@@ -91,6 +91,7 @@ fn api_router() -> Router<Arc<AppState>> {
             post(save_policy_draft_handler).get(list_policy_versions_handler),
         )
         .route("/policies/diff", get(diff_policy_versions_handler))
+        .route("/policies/validate", post(validate_policy_handler))
         .route("/policies/{version}", get(get_policy_version_handler))
         .route(
             "/policies/{version}/publish",
@@ -444,6 +445,31 @@ async fn save_policy_draft_handler(
         }
         Err(e) => policies_error_response(e),
     }
+}
+
+#[derive(Deserialize)]
+struct ValidatePolicyRequest {
+    policy_text: String,
+    schema_text: Option<String>,
+}
+
+/// Checks Cedar source without saving anything — "validate as you type" in
+/// the dashboard would otherwise mean one new `policy_versions` row per
+/// keystroke if it called `save_draft` directly.
+async fn validate_policy_handler(
+    AdminUser(user): AdminUser,
+    headers: HeaderMap,
+    Json(req): Json<ValidatePolicyRequest>,
+) -> impl IntoResponse {
+    if let Err(status) = user.check_csrf(&headers) {
+        return status.into_response();
+    }
+    let validation_error = policies::validate(&req.policy_text, req.schema_text.as_deref());
+    Json(serde_json::json!({
+        "valid": validation_error.is_none(),
+        "validation_error": validation_error,
+    }))
+    .into_response()
 }
 
 async fn list_policy_versions_handler(
