@@ -104,6 +104,25 @@ button.danger {
   border-color: var(--color-danger);
 }
 
+/* A link that's meant to look and behave like a primary button (e.g. "New
+   agent") - a real <button> inside an <a> would give assistive tech two
+   nested interactive controls for one action, so this styles the link
+   itself instead. */
+.button-link {
+  display: inline-block;
+  border: 1px solid var(--color-ink);
+  background: var(--color-ink);
+  color: var(--color-ivory);
+  border-radius: 4px;
+  padding: var(--space-2) var(--space-3);
+  text-decoration: none;
+}
+
+.button-link:hover {
+  background: var(--color-rust-hover);
+  border-color: var(--color-rust-hover);
+}
+
 input,
 select {
   border: 1px solid var(--color-border);

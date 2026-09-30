@@ -39,13 +39,15 @@
     "name": "Nume",
     "status": "Stare",
     "owner": "Responsabil",
+    "description": "Descriere",
     "expiry": "Expirare",
     "create": "Agent nou",
     "disable": "Dezactivează",
     "enable": "Activează",
     "issueToken": "Emite token",
     "tokenShownOnce": "Acest token este afișat o singură dată. Copiați-l acum — nu mai poate fi recuperat.",
-    "confirmDisable": "Dezactivați acest agent? Nu se va mai putea autentifica după următoarea sincronizare a gateway-ului."
+    "confirmDisable": "Dezactivați acest agent? Nu se va mai putea autentifica după următoarea sincronizare a gateway-ului.",
+    "errorNameTaken": "Există deja un agent cu acest nume."
   },
   "common": {
     "loading": "Se încarcă…",

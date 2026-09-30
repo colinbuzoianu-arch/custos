@@ -1,4 +1,12 @@
-import type { Agent, LoginResponse, Me, Overview } from './types'
+import type {
+  Agent,
+  CreateAgentInput,
+  IssuedToken,
+  LoginResponse,
+  Me,
+  Overview,
+  UpdateAgentInput,
+} from './types'
 
 const BASE = '/api'
 
@@ -83,5 +91,23 @@ export const api = {
 
   listAgents(): Promise<Agent[]> {
     return request<Agent[]>('/agents')
+  },
+
+  getAgent(id: string): Promise<Agent> {
+    return request<Agent>(`/agents/${id}`)
+  },
+
+  createAgent(input: CreateAgentInput): Promise<Agent> {
+    return request<Agent>('/agents', { method: 'POST', body: JSON.stringify(input) })
+  },
+
+  updateAgent(id: string, patch: UpdateAgentInput): Promise<Agent> {
+    return request<Agent>(`/agents/${id}`, { method: 'PATCH', body: JSON.stringify(patch) })
+  },
+
+  /** Shown exactly once in this response - never retrievable again, not
+   * even by calling this again (that issues a brand new token). */
+  issueToken(id: string): Promise<IssuedToken> {
+    return request<IssuedToken>(`/agents/${id}/token`, { method: 'POST' })
   },
 }

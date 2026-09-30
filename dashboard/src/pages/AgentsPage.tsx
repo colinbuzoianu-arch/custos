@@ -1,13 +1,10 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { Link } from 'react-router-dom'
 
 import { api } from '../api/client'
 import type { Agent } from '../api/types'
 
-// Create / disable / issue-token are deliberately not here yet - this
-// commit scaffolds the dashboard and wires up read-only data; those
-// mutating actions (and the "token shown once" flow they need) are
-// tracked as the rest of session 14's Agents page.
 export function AgentsPage() {
   const { t } = useTranslation()
   const [agents, setAgents] = useState<Agent[] | null>(null)
@@ -37,7 +34,12 @@ export function AgentsPage() {
 
   return (
     <div>
-      <h1>{t('agents.heading')}</h1>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+        <h1>{t('agents.heading')}</h1>
+        <Link to="/agents/new" className="button-link">
+          {t('agents.create')}
+        </Link>
+      </div>
       <table>
         <thead>
           <tr>
@@ -49,7 +51,9 @@ export function AgentsPage() {
         <tbody>
           {agents.map((agent) => (
             <tr key={agent.id}>
-              <th scope="row">{agent.name}</th>
+              <th scope="row">
+                <Link to={`/agents/${agent.id}`}>{agent.name}</Link>
+              </th>
               <td>{agent.status}</td>
               <td>{agent.expiry_date ?? '—'}</td>
             </tr>

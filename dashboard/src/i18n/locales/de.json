@@ -39,13 +39,15 @@
     "name": "Name",
     "status": "Status",
     "owner": "Verantwortlich",
+    "description": "Beschreibung",
     "expiry": "Ablauf",
     "create": "Neuer Agent",
     "disable": "Deaktivieren",
     "enable": "Aktivieren",
     "issueToken": "Token ausstellen",
     "tokenShownOnce": "Dieses Token wird nur einmal angezeigt. Kopieren Sie es jetzt — es kann nicht erneut abgerufen werden.",
-    "confirmDisable": "Diesen Agenten deaktivieren? Er kann sich nach der nächsten Gateway-Synchronisierung nicht mehr authentifizieren."
+    "confirmDisable": "Diesen Agenten deaktivieren? Er kann sich nach der nächsten Gateway-Synchronisierung nicht mehr authentifizieren.",
+    "errorNameTaken": "Ein Agent mit diesem Namen existiert bereits."
   },
   "common": {
     "loading": "Wird geladen…",

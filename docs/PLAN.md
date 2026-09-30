@@ -154,8 +154,10 @@ Each session = one branch/commit, `/check` green, `/security-review` before comm
 - [ ] Embedded in the control binary — deferred, see docs/decisions/0006-dashboard.md
       (needs `dashboard/dist/` to exist before `cargo build`, which needs a real
       build/CI sequencing step first).
-- [ ] Pages: Login ✓, Overview ✓ (decisions today, blocked %, top blocked agents/tools,
-      gateway health), Agents — list ✓, detail/create/disable/issue-token still open.
+- [x] Pages: Login, Overview (decisions today, blocked %, top blocked agents/tools, gateway
+      health), Agents (list, detail, create, disable/enable, issue token — "shown once" UI).
+      Agent owner isn't selectable on create yet: no `GET /api/users` (or similar) endpoint
+      exists to populate a picker from.
 - [ ] Accessibility: visible focus and semantic markup are in place, but not verified in
       an actual browser (no browser available while building this) — needs a real check.
 

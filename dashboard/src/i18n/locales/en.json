@@ -39,13 +39,15 @@
     "name": "Name",
     "status": "Status",
     "owner": "Owner",
+    "description": "Description",
     "expiry": "Expiry",
     "create": "New agent",
     "disable": "Disable",
     "enable": "Enable",
     "issueToken": "Issue token",
     "tokenShownOnce": "This token is shown once. Copy it now — it can't be retrieved again.",
-    "confirmDisable": "Disable this agent? It will no longer be able to authenticate once its gateway syncs."
+    "confirmDisable": "Disable this agent? It will no longer be able to authenticate once its gateway syncs.",
+    "errorNameTaken": "An agent with this name already exists."
   },
   "common": {
     "loading": "Loading…",

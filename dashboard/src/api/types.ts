@@ -55,6 +55,23 @@ export interface Gateway {
   chain_issue: string | null
 }
 
+export interface CreateAgentInput {
+  name: string
+  description?: string | null
+  expiry_date?: string | null
+}
+
+export interface UpdateAgentInput {
+  name?: string
+  description?: string
+  status?: AgentStatus
+  expiry_date?: string
+}
+
+export interface IssuedToken {
+  token: string
+}
+
 export interface Overview {
   decisions_today: DecisionCounts
   blocked_percent: number

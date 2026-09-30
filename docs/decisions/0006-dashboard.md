@@ -47,9 +47,11 @@ from the start); this ADR covers what came up while actually building it.
   dashboard. Deferred until there's a real build/CI step to sequence the
   two — for now, `npm run dev`'s proxy (`vite.config.ts`) is the only
   supported way to run the dashboard against Control.
-- **Agents page is read-only** (list only). Create, disable, and issue
-  token — including the "shown once" token flow — are the rest of session
-  14, not done here.
+- **Agents page has full CRUD** (list, detail, create, disable/enable,
+  issue token with a "shown once" display) as of the follow-up commit, but
+  **create has no owner picker** — there's no `GET /api/users` (or
+  equivalent) endpoint yet to populate one from, so `owner_user_id` is
+  always left unset from the dashboard today.
 - **No browser was used to verify this work.** Build (`tsc -b && vite
   build`), lint (`oxlint`), and the dev server's proxy behavior were all
   checked from the command line; visible-focus, keyboard navigation, and
