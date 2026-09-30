@@ -3,6 +3,9 @@
 //! a batch over an unrecognized field), and flags chain gaps/breaks per
 //! gateway without re-deriving the gateway's own SHA-256 hash chain.
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use serde::Serialize;
 use serde_json::Value;
 use sqlx::PgPool;
 use time::OffsetDateTime;
@@ -15,13 +18,93 @@ pub enum AuditError {
     Db(#[from] sqlx::Error),
     #[error("gateway not found")]
     GatewayNotFound,
+    #[error("invalid cursor: {0}")]
+    Cursor(String),
 }
+
+/// One ingested (or already-known) audit record, exactly as the search API
+/// and the live SSE stream both return it.
+#[derive(Debug, Clone, Serialize)]
+pub struct AuditRecordSummary {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub gateway_id: Uuid,
+    pub seq: i64,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub ts: Option<OffsetDateTime>,
+    pub agent: Option<String>,
+    pub owner: Option<String>,
+    pub tool: Option<String>,
+    pub verdict: Option<String>,
+    pub policy_version: Option<String>,
+    pub findings: Option<Value>,
+    /// The exact JSON the gateway wrote — everything above is extracted
+    /// from this for filtering/display convenience.
+    pub record: Value,
+    #[serde(with = "time::serde::rfc3339")]
+    pub ingested_at: OffsetDateTime,
+}
+
+type RecordRow = (
+    Uuid,
+    Uuid,
+    Uuid,
+    i64,
+    Option<OffsetDateTime>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<Value>,
+    Value,
+    OffsetDateTime,
+);
+
+fn row_to_summary(row: RecordRow) -> AuditRecordSummary {
+    let (
+        id,
+        tenant_id,
+        gateway_id,
+        seq,
+        ts,
+        agent,
+        owner,
+        tool,
+        verdict,
+        policy_version,
+        findings,
+        record,
+        ingested_at,
+    ) = row;
+    AuditRecordSummary {
+        id,
+        tenant_id,
+        gateway_id,
+        seq,
+        ts,
+        agent,
+        owner,
+        tool,
+        verdict,
+        policy_version,
+        findings,
+        record,
+        ingested_at,
+    }
+}
+
+const RECORD_COLUMNS: &str = "id, tenant_id, gateway_id, seq, ts, agent, owner, tool, verdict, policy_version, findings, record, ingested_at";
 
 #[derive(Debug, Default, serde::Serialize)]
 pub struct IngestOutcome {
     pub inserted: usize,
     pub duplicates: usize,
     pub skipped: usize,
+    /// Newly inserted records only (never duplicates) — what the caller
+    /// broadcasts to any live SSE subscribers.
+    #[serde(skip)]
+    pub inserted_records: Vec<AuditRecordSummary>,
 }
 
 /// Ingests one batch of raw audit-log lines (each exactly what the gateway
@@ -79,31 +162,34 @@ pub async fn ingest_batch(
         let prev_hash = record.get("prev_hash").and_then(Value::as_str);
         let hash = record.get("hash").and_then(Value::as_str);
 
-        let result = sqlx::query(
+        let sql = format!(
             "insert into audit_records
                 (tenant_id, gateway_id, seq, ts, agent, owner, tool, verdict, policy_version, findings, record)
              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-             on conflict (gateway_id, seq) do nothing",
-        )
-        .bind(tenant_id)
-        .bind(gateway_id)
-        .bind(seq)
-        .bind(ts)
-        .bind(agent)
-        .bind(owner)
-        .bind(tool)
-        .bind(verdict)
-        .bind(policy_version)
-        .bind(findings)
-        .bind(record)
-        .execute(pool)
-        .await?;
+             on conflict (gateway_id, seq) do nothing
+             returning {RECORD_COLUMNS}"
+        );
+        let inserted: Option<RecordRow> = sqlx::query_as(&sql)
+            .bind(tenant_id)
+            .bind(gateway_id)
+            .bind(seq)
+            .bind(ts)
+            .bind(agent)
+            .bind(owner)
+            .bind(tool)
+            .bind(verdict)
+            .bind(policy_version)
+            .bind(findings)
+            .bind(record)
+            .fetch_optional(pool)
+            .await?;
 
-        if result.rows_affected() == 0 {
+        let Some(row) = inserted else {
             outcome.duplicates += 1;
             continue;
-        }
+        };
         outcome.inserted += 1;
+        outcome.inserted_records.push(row_to_summary(row));
 
         if let (Some(prev_seq), Some(prev_h)) = (last_seq, last_hash.as_deref()) {
             if seq != prev_seq + 1 {
@@ -136,6 +222,114 @@ pub async fn ingest_batch(
     Ok(outcome)
 }
 
+/// Encodes a keyset-pagination cursor from the last row of a page — opaque
+/// to callers, just base64 so it's a safe query-string value.
+fn encode_cursor(ingested_at: OffsetDateTime, id: Uuid) -> Result<String, AuditError> {
+    let ts = ingested_at
+        .format(&Rfc3339)
+        .map_err(|e| AuditError::Cursor(e.to_string()))?;
+    Ok(URL_SAFE_NO_PAD.encode(format!("{ts},{id}")))
+}
+
+fn decode_cursor(cursor: &str) -> Result<(OffsetDateTime, Uuid), AuditError> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|e| AuditError::Cursor(e.to_string()))?;
+    let text = String::from_utf8(bytes).map_err(|e| AuditError::Cursor(e.to_string()))?;
+    let (ts_str, id_str) = text
+        .split_once(',')
+        .ok_or_else(|| AuditError::Cursor("malformed cursor".into()))?;
+    let ts =
+        OffsetDateTime::parse(ts_str, &Rfc3339).map_err(|e| AuditError::Cursor(e.to_string()))?;
+    let id = Uuid::parse_str(id_str).map_err(|e| AuditError::Cursor(e.to_string()))?;
+    Ok((ts, id))
+}
+
+/// Search filters — every field optional except `limit`, which the caller
+/// (the HTTP handler) has already clamped to a sane range.
+#[derive(Debug, Default)]
+pub struct SearchFilters {
+    pub agent: Option<String>,
+    pub tool: Option<String>,
+    pub verdict: Option<String>,
+    pub policy_version: Option<String>,
+    pub from: Option<OffsetDateTime>,
+    pub to: Option<OffsetDateTime>,
+    pub cursor: Option<String>,
+    pub limit: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SearchResult {
+    pub records: Vec<AuditRecordSummary>,
+    /// `Some` only when there may be more results — pass it back as
+    /// `cursor` to fetch the next page. Its absence doesn't guarantee
+    /// there's nothing more as of a split second later, only that there
+    /// wasn't when this page was read.
+    pub next_cursor: Option<String>,
+}
+
+/// Filters by agent/tool/verdict/policy_version (exact match) and a
+/// `ts` range, ordered newest-ingested-first with keyset pagination on
+/// `(ingested_at, id)` — not `ts`, since `ts` can be null for a malformed
+/// record and a stable sort key can't be.
+pub async fn search(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    filters: SearchFilters,
+) -> Result<SearchResult, AuditError> {
+    let (cursor_ts, cursor_id) = match &filters.cursor {
+        Some(c) => {
+            let (ts, id) = decode_cursor(c)?;
+            (Some(ts), Some(id))
+        }
+        None => (None, None),
+    };
+
+    let sql = format!(
+        "select {RECORD_COLUMNS} from audit_records
+         where tenant_id = $1
+           and ($2::text is null or agent = $2)
+           and ($3::text is null or tool = $3)
+           and ($4::text is null or verdict = $4)
+           and ($5::text is null or policy_version = $5)
+           and ($6::timestamptz is null or ts >= $6)
+           and ($7::timestamptz is null or ts <= $7)
+           and ($8::timestamptz is null or $9::uuid is null or (ingested_at, id) < ($8, $9))
+         order by ingested_at desc, id desc
+         limit $10"
+    );
+    let rows: Vec<RecordRow> = sqlx::query_as(&sql)
+        .bind(tenant_id)
+        .bind(&filters.agent)
+        .bind(&filters.tool)
+        .bind(&filters.verdict)
+        .bind(&filters.policy_version)
+        .bind(filters.from)
+        .bind(filters.to)
+        .bind(cursor_ts)
+        .bind(cursor_id)
+        .bind(filters.limit)
+        .fetch_all(pool)
+        .await?;
+
+    let has_more = rows.len() as i64 == filters.limit;
+    let records: Vec<AuditRecordSummary> = rows.into_iter().map(row_to_summary).collect();
+    let next_cursor = if has_more {
+        match records.last() {
+            Some(last) => Some(encode_cursor(last.ingested_at, last.id)?),
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    Ok(SearchResult {
+        records,
+        next_cursor,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,5 +345,29 @@ mod tests {
             .and_then(|d| d.get("verdict"))
             .and_then(Value::as_str);
         assert_eq!(verdict, Some("BLOCK"));
+    }
+
+    #[test]
+    fn cursor_round_trips() {
+        let ts = OffsetDateTime::from_unix_timestamp(1_700_000_000)
+            .unwrap_or_else(|_| panic!("fixed timestamp must be valid"));
+        let id = Uuid::new_v4();
+        let cursor = match encode_cursor(ts, id) {
+            Ok(c) => c,
+            Err(e) => panic!("{e}"),
+        };
+        let (decoded_ts, decoded_id) = match decode_cursor(&cursor) {
+            Ok(v) => v,
+            Err(e) => panic!("{e}"),
+        };
+        assert_eq!(decoded_ts, ts);
+        assert_eq!(decoded_id, id);
+    }
+
+    #[test]
+    fn a_malformed_cursor_is_rejected_not_panicked_on() {
+        for bad in ["not-base64!!", "", "aGVsbG8"] {
+            assert!(decode_cursor(bad).is_err(), "{bad:?} should be rejected");
+        }
     }
 }

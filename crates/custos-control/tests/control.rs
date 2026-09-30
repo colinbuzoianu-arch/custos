@@ -27,6 +27,7 @@ fn test_state(db: PgPool) -> Arc<AppState> {
         db,
         login_attempts: RateLimiter::default(),
         policy_signing_key: SigningKey::from_bytes(&[1u8; 32]),
+        audit_events: tokio::sync::broadcast::channel(custos_control::AUDIT_EVENTS_CAPACITY).0,
     })
 }
 
@@ -911,4 +912,134 @@ async fn a_verdict_is_searchable_after_ingest() {
     };
     assert_eq!(row.0.as_deref(), Some("payroll.read"));
     assert_eq!(row.1.as_deref(), Some("BLOCK"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn search_filters_by_tool_and_verdict() {
+    let f = fixture(Role::Admin).await;
+    let gw = enrolled_gateway(&f, "gw-search-filters").await;
+
+    let records = vec![
+        fake_record(1, &"0".repeat(64), "h1", "payroll.read", "BLOCK"),
+        fake_record(2, "h1", "h2", "echo", "ALLOW"),
+    ];
+    if let Err(e) = audit::ingest_batch(&f.db, f.tenant_id, gw.gateway_id, &records).await {
+        panic!("{e}");
+    }
+
+    let result = match audit::search(
+        &f.db,
+        f.tenant_id,
+        audit::SearchFilters {
+            tool: Some("payroll.read".into()),
+            limit: 50,
+            ..Default::default()
+        },
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].verdict.as_deref(), Some("BLOCK"));
+
+    let result = match audit::search(
+        &f.db,
+        f.tenant_id,
+        audit::SearchFilters {
+            verdict: Some("ALLOW".into()),
+            limit: 50,
+            ..Default::default()
+        },
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].tool.as_deref(), Some("echo"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn search_never_returns_another_tenants_records() {
+    let f1 = fixture(Role::Admin).await;
+    let gw1 = enrolled_gateway(&f1, "gw-tenant-1").await;
+    if let Err(e) = audit::ingest_batch(
+        &f1.db,
+        f1.tenant_id,
+        gw1.gateway_id,
+        &[fake_record(1, &"0".repeat(64), "h1", "echo", "ALLOW")],
+    )
+    .await
+    {
+        panic!("{e}");
+    }
+
+    let f2 = fixture(Role::Admin).await;
+    let result = match audit::search(
+        &f1.db,
+        f2.tenant_id,
+        audit::SearchFilters {
+            limit: 50,
+            ..Default::default()
+        },
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    assert!(result.records.is_empty());
+}
+
+#[tokio::test]
+#[ignore]
+async fn search_pagination_walks_every_record_exactly_once() {
+    let f = fixture(Role::Admin).await;
+    let gw = enrolled_gateway(&f, "gw-search-paging").await;
+
+    let mut prev_hash = "0".repeat(64);
+    let mut records = Vec::new();
+    for seq in 1..=5u64 {
+        let hash = format!("h{seq}");
+        records.push(fake_record(seq, &prev_hash, &hash, "echo", "ALLOW"));
+        prev_hash = hash;
+    }
+    if let Err(e) = audit::ingest_batch(&f.db, f.tenant_id, gw.gateway_id, &records).await {
+        panic!("{e}");
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut cursor = None;
+    loop {
+        let result = match audit::search(
+            &f.db,
+            f.tenant_id,
+            audit::SearchFilters {
+                cursor: cursor.clone(),
+                limit: 2,
+                ..Default::default()
+            },
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => panic!("{e}"),
+        };
+        for record in &result.records {
+            seen.insert(record.seq);
+        }
+        match result.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+        if seen.len() > 5 {
+            panic!("pagination looped past every record without stopping");
+        }
+    }
+    assert_eq!(seen.len(), 5);
 }

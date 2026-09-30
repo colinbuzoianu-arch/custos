@@ -38,7 +38,16 @@ pub struct AppState {
     /// Signs every policy bundle on publish. See
     /// `docs/decisions/0003-policy-bundle.md`.
     pub policy_signing_key: SigningKey,
+    /// Fans out every newly ingested audit record to `/audit/stream`
+    /// subscribers. A `send` with no subscribers is the normal case (no
+    /// dashboard open) and isn't an error.
+    pub audit_events: tokio::sync::broadcast::Sender<audit::AuditRecordSummary>,
 }
+
+/// How many audit events a lagging SSE subscriber can fall behind before
+/// old ones are dropped for it (it still gets a `Lagged` notice, handled as
+/// "skip ahead," never a hard disconnect).
+pub const AUDIT_EVENTS_CAPACITY: usize = 1024;
 
 /// Connects to Postgres, failing fast if it's unreachable rather than
 /// starting up unable to do anything.
@@ -88,6 +97,8 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/gateways/bundle", get(gateway_bundle_handler))
         .route("/gateways/heartbeat", post(heartbeat_handler))
         .route("/gateways/audit/batch", post(ingest_audit_batch_handler))
+        .route("/audit", get(search_audit_handler))
+        .route("/audit/stream", get(audit_stream_handler))
         .with_state(state)
 }
 
@@ -614,8 +625,9 @@ async fn heartbeat_handler(
 fn audit_error_response(e: audit::AuditError) -> axum::response::Response {
     match e {
         audit::AuditError::GatewayNotFound => StatusCode::NOT_FOUND.into_response(),
+        audit::AuditError::Cursor(_) => StatusCode::BAD_REQUEST.into_response(),
         audit::AuditError::Db(e) => {
-            tracing::error!(error = %e, "audit ingest db error");
+            tracing::error!(error = %e, "audit db error");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
@@ -627,9 +639,105 @@ async fn ingest_audit_batch_handler(
     Json(records): Json<Vec<serde_json::Value>>,
 ) -> impl IntoResponse {
     match audit::ingest_batch(&state.db, auth.tenant_id, auth.gateway_id, &records).await {
-        Ok(outcome) => (StatusCode::OK, Json(outcome)).into_response(),
+        Ok(outcome) => {
+            for record in &outcome.inserted_records {
+                // No subscribers is the common case (no dashboard open) and
+                // not an error - `send` only fails when nobody's listening.
+                let _ = state.audit_events.send(record.clone());
+            }
+            (StatusCode::OK, Json(outcome)).into_response()
+        }
         Err(e) => audit_error_response(e),
     }
+}
+
+#[derive(Deserialize)]
+struct AuditSearchQuery {
+    agent: Option<String>,
+    tool: Option<String>,
+    verdict: Option<String>,
+    policy_version: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+    cursor: Option<String>,
+    limit: Option<i64>,
+}
+
+/// Parses an optional RFC3339 timestamp from a query parameter, `Bad
+/// Request` on anything malformed.
+fn parse_query_timestamp(s: &Option<String>) -> Result<Option<time::OffsetDateTime>, StatusCode> {
+    match s {
+        None => Ok(None),
+        Some(s) => time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
+            .map(Some)
+            .map_err(|_| StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn search_audit_handler(
+    State(state): State<Arc<AppState>>,
+    user: CurrentUser,
+    Query(q): Query<AuditSearchQuery>,
+) -> impl IntoResponse {
+    let from = match parse_query_timestamp(&q.from) {
+        Ok(v) => v,
+        Err(status) => return status.into_response(),
+    };
+    let to = match parse_query_timestamp(&q.to) {
+        Ok(v) => v,
+        Err(status) => return status.into_response(),
+    };
+    let filters = audit::SearchFilters {
+        agent: q.agent,
+        tool: q.tool,
+        verdict: q.verdict,
+        policy_version: q.policy_version,
+        from,
+        to,
+        cursor: q.cursor,
+        limit: q.limit.unwrap_or(50).clamp(1, 200),
+    };
+    match audit::search(&state.db, user.tenant_id, filters).await {
+        Ok(result) => Json(result).into_response(),
+        Err(e) => audit_error_response(e),
+    }
+}
+
+/// Turns a broadcast receiver into an SSE event stream scoped to one
+/// tenant: a record for a different tenant is silently skipped (never
+/// yielded), a lagging subscriber just skips ahead rather than
+/// disconnecting, and the stream only ends if the sender itself is gone.
+fn audit_event_stream(
+    rx: tokio::sync::broadcast::Receiver<audit::AuditRecordSummary>,
+    tenant_id: Uuid,
+) -> impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>
+{
+    futures_util::stream::unfold((rx, tenant_id), |(mut rx, tenant_id)| async move {
+        loop {
+            match rx.recv().await {
+                Ok(record) if record.tenant_id == tenant_id => {
+                    let event = match axum::response::sse::Event::default().json_data(&record) {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+                    return Some((Ok(event), (rx, tenant_id)));
+                }
+                Ok(_) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    })
+}
+
+async fn audit_stream_handler(
+    State(state): State<Arc<AppState>>,
+    user: CurrentUser,
+) -> axum::response::sse::Sse<
+    impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    let stream = audit_event_stream(state.audit_events.subscribe(), user.tenant_id);
+    axum::response::sse::Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
 }
 
 #[cfg(test)]
@@ -654,6 +762,7 @@ mod tests {
             db,
             login_attempts: Default::default(),
             policy_signing_key: SigningKey::from_bytes(&[1u8; 32]),
+            audit_events: tokio::sync::broadcast::channel(AUDIT_EVENTS_CAPACITY).0,
         })
     }
 
@@ -668,5 +777,59 @@ mod tests {
             Err(e) => panic!("{e}"),
         };
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    fn sample_summary(tenant_id: Uuid) -> audit::AuditRecordSummary {
+        audit::AuditRecordSummary {
+            id: Uuid::new_v4(),
+            tenant_id,
+            gateway_id: Uuid::new_v4(),
+            seq: 1,
+            ts: None,
+            agent: None,
+            owner: None,
+            tool: None,
+            verdict: None,
+            policy_version: None,
+            findings: None,
+            record: serde_json::json!({}),
+            ingested_at: time::OffsetDateTime::now_utc(),
+        }
+    }
+
+    #[tokio::test]
+    async fn audit_stream_yields_only_records_for_its_own_tenant() {
+        use futures_util::StreamExt;
+
+        let (tx, rx) = tokio::sync::broadcast::channel(16);
+        let my_tenant = Uuid::new_v4();
+        let other_tenant = Uuid::new_v4();
+        let mut stream = std::pin::pin!(audit_event_stream(rx, my_tenant));
+
+        // Sent before anyone polls the stream, so both are already queued
+        // when we start reading: the other tenant's record must never
+        // surface, the matching one must.
+        if tx.send(sample_summary(other_tenant)).is_err() {
+            panic!("send must succeed with a live receiver");
+        }
+        if tx.send(sample_summary(my_tenant)).is_err() {
+            panic!("send must succeed with a live receiver");
+        }
+
+        let next = match stream.next().await {
+            Some(item) => item,
+            None => panic!("stream ended before yielding the matching record"),
+        };
+        assert!(next.is_ok());
+    }
+
+    #[tokio::test]
+    async fn audit_stream_ends_when_the_sender_is_dropped() {
+        use futures_util::StreamExt;
+
+        let (tx, rx) = tokio::sync::broadcast::channel::<audit::AuditRecordSummary>(16);
+        let mut stream = std::pin::pin!(audit_event_stream(rx, Uuid::new_v4()));
+        drop(tx);
+        assert!(stream.next().await.is_none());
     }
 }

@@ -136,12 +136,17 @@ Each session = one branch/commit, `/check` green, `/security-review` before comm
   (see `docs/decisions/0004-gateway-sync.md`).
 
 ### Session 13 — audit shipping
-- [ ] Gateway ships audit records to Control in batches, with retry and backoff; local file is
+- [x] Gateway ships audit records to Control in batches, with retry and backoff; local file is
       the buffer, nothing is lost if Control is down. Idempotent by (gateway_id, seq).
-- [ ] Control checks chain continuity per gateway and flags gaps or broken hashes.
-- [ ] Search API: filter by agent, tool, verdict, time range, policy_version; cursor pagination.
-- [ ] Live stream endpoint (SSE) of new decisions for the dashboard.
-- Tests: duplicate batch ignored, gap detected, search filters correct.
+      (Retry is "next scheduled tick, same checkpoint" rather than exponential backoff — see
+      docs/decisions/0004-gateway-sync.md's fixed-interval preference, same reasoning applies.)
+- [x] Control checks chain continuity per gateway and flags gaps or broken hashes.
+      (Flags via (seq, prev_hash) comparison; doesn't re-derive the versioned SHA-256 chain
+      itself — see docs/decisions/0005-audit-ingest.md.)
+- [x] Search API: filter by agent, tool, verdict, time range, policy_version; cursor pagination.
+- [x] Live stream endpoint (SSE) of new decisions for the dashboard.
+- Tests: duplicate batch ignored ✓, gap detected ✓, search filters correct ✓ (plus pagination,
+  tenant isolation, and SSE tenant-scoping).
 
 ### Session 14 — dashboard shell
 - [ ] `dashboard/` with Vite + React + TS, router, i18n (EN/DE/RO), API client with CSRF.

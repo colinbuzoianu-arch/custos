@@ -64,6 +64,10 @@ async fn main() -> anyhow::Result<()> {
                 db,
                 login_attempts: Default::default(),
                 policy_signing_key: ed25519_dalek::SigningKey::from_bytes(&signing_key_bytes),
+                audit_events: tokio::sync::broadcast::channel(
+                    custos_control::AUDIT_EVENTS_CAPACITY,
+                )
+                .0,
             });
             let listener = tokio::net::TcpListener::bind(cfg.listen).await?;
             tracing::info!(listen = %cfg.listen, "custos-control started");
