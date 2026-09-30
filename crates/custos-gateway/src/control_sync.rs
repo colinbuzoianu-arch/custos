@@ -56,6 +56,12 @@ pub struct ControlState {
     pub gateway_id: Uuid,
     pub credential: String,
     pub control_public_key: String,
+    /// The highest audit-log `seq` successfully shipped so far. `#[serde(default)]`
+    /// so a state file written by session 12 (before shipping existed)
+    /// still loads — everything ships from the start of the log the first
+    /// time a gateway with an older state file syncs.
+    #[serde(default)]
+    pub last_shipped_seq: Option<u64>,
 }
 
 impl ControlState {
@@ -121,6 +127,7 @@ pub async fn enroll(
         gateway_id: body.gateway_id,
         credential: body.credential,
         control_public_key: body.control_public_key,
+        last_shipped_seq: None,
     }
     .save(state_path)
 }
@@ -132,7 +139,7 @@ pub async fn enroll(
 /// feature.
 pub fn spawn(state: Arc<AppState>, control: ControlConfig) {
     tokio::spawn(async move {
-        let control_state = match ControlState::load(&control.state_path) {
+        let mut control_state = match ControlState::load(&control.state_path) {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(error = %e, "could not load control state; sync disabled - run `custos enroll` first");
@@ -161,6 +168,7 @@ pub fn spawn(state: Arc<AppState>, control: ControlConfig) {
             )
             .await;
             send_heartbeat(&state, &client, &control, &control_state).await;
+            ship_audit_once(&state, &client, &control, &mut control_state).await;
         }
     });
 }
@@ -290,6 +298,91 @@ async fn send_heartbeat(
     }
 }
 
+/// How many audit lines to send per request — a cap, not a target; a slow
+/// gateway with a big backlog just takes several ticks to catch up.
+const AUDIT_BATCH_SIZE: usize = 500;
+
+/// Ships unshipped audit-log lines to Control, advancing the checkpoint
+/// only once a batch is accepted. On any failure — can't open/read the log,
+/// Control unreachable, Control rejects the batch — this changes nothing
+/// and logs; the local file is the durable buffer, so the next tick just
+/// tries again from the same checkpoint. Lines this gateway can't parse as
+/// JSON, or that have no `seq`, are skipped (never block the rest of the
+/// file from shipping).
+async fn ship_audit_once(
+    state: &Arc<AppState>,
+    client: &reqwest::Client,
+    control: &ControlConfig,
+    control_state: &mut ControlState,
+) {
+    let path = match state.audit.lock() {
+        Ok(log) => log.path().to_path_buf(),
+        Err(_) => {
+            tracing::error!("audit log mutex poisoned; skipping this shipping tick");
+            return;
+        }
+    };
+    let file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "could not open audit log for shipping");
+            return;
+        }
+    };
+
+    let already_shipped = control_state.last_shipped_seq.unwrap_or(0);
+    let mut batch: Vec<serde_json::Value> = Vec::new();
+    for line in std::io::BufRead::lines(std::io::BufReader::new(file)) {
+        let Ok(line) = line else { break };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let Some(seq) = value.get("seq").and_then(serde_json::Value::as_u64) else {
+            continue;
+        };
+        if seq <= already_shipped {
+            continue;
+        }
+        batch.push(value);
+        if batch.len() >= AUDIT_BATCH_SIZE {
+            break;
+        }
+    }
+    if batch.is_empty() {
+        return;
+    }
+    let highest_seq = batch
+        .iter()
+        .filter_map(|r| r.get("seq").and_then(serde_json::Value::as_u64))
+        .max();
+
+    let result = client
+        .post(format!("{}/gateways/audit/batch", control.url))
+        .bearer_auth(&control_state.credential)
+        .json(&batch)
+        .send()
+        .await;
+    match result {
+        Ok(r) if r.status().is_success() => {
+            if let Some(seq) = highest_seq {
+                control_state.last_shipped_seq = Some(seq);
+                if let Err(e) = control_state.save(&control.state_path) {
+                    tracing::error!(error = %e, "could not persist audit shipping checkpoint; may re-ship this batch next tick");
+                }
+            }
+        }
+        Ok(r) => {
+            tracing::warn!(status = %r.status(), "Control rejected audit batch; will retry next tick")
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not ship audit batch to Control; will retry next tick")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,6 +484,7 @@ mod tests {
             gateway_id: Uuid::new_v4(),
             credential: "test-credential".into(),
             control_public_key: "00".repeat(32),
+            last_shipped_seq: None,
         }
     }
 
@@ -486,5 +580,146 @@ mod tests {
 
         assert!(allows(&state, "echo"));
         assert!(!allows(&state, "get-env"));
+    }
+
+    /// Spawns a fake Control that records how many records were in the last
+    /// batch it received at `/gateways/audit/batch`, replying with `status`.
+    async fn fake_audit_ingest(
+        status: axum::http::StatusCode,
+        received_count: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> String {
+        let router = Router::new().route(
+            "/gateways/audit/batch",
+            axum::routing::post(
+                move |axum::Json(body): axum::Json<Vec<serde_json::Value>>| {
+                    let received_count = received_count.clone();
+                    async move {
+                        received_count.store(body.len(), std::sync::atomic::Ordering::Relaxed);
+                        status
+                    }
+                },
+            ),
+        );
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(e) => panic!("{e}"),
+        };
+        let addr = match listener.local_addr() {
+            Ok(a) => a,
+            Err(e) => panic!("{e}"),
+        };
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        format!("http://{addr}")
+    }
+
+    fn append_raw_line(path: &std::path::Path, value: &serde_json::Value) {
+        use std::io::Write;
+        let mut file = match std::fs::OpenOptions::new().append(true).open(path) {
+            Ok(f) => f,
+            Err(e) => panic!("{e}"),
+        };
+        if let Err(e) = writeln!(file, "{value}") {
+            panic!("{e}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_successful_ship_advances_and_persists_the_checkpoint() {
+        let dir = match tempfile::tempdir() {
+            Ok(d) => d,
+            Err(e) => panic!("{e}"),
+        };
+        let state = state_with_policy(
+            dir.path(),
+            r#"permit (principal, action, resource == Tool::"echo");"#,
+        );
+        let audit_path = match state.audit.lock() {
+            Ok(log) => log.path().to_path_buf(),
+            Err(e) => panic!("{e:?}"),
+        };
+        append_raw_line(&audit_path, &serde_json::json!({"seq": 1, "tool": "echo"}));
+        append_raw_line(&audit_path, &serde_json::json!({"seq": 2, "tool": "echo"}));
+
+        let received = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let url = fake_audit_ingest(axum::http::StatusCode::OK, received.clone()).await;
+        let state_path = dir.path().join("control-state.json");
+        let mut control = sample_control_config(url);
+        control.state_path = state_path.clone();
+        let mut control_state = sample_control_state();
+        let client = reqwest::Client::new();
+
+        ship_audit_once(&state, &client, &control, &mut control_state).await;
+
+        assert_eq!(received.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(control_state.last_shipped_seq, Some(2));
+        let reloaded = match ControlState::load(&state_path) {
+            Ok(s) => s,
+            Err(e) => panic!("{e}"),
+        };
+        assert_eq!(reloaded.last_shipped_seq, Some(2));
+    }
+
+    #[tokio::test]
+    async fn a_rejected_batch_does_not_advance_the_checkpoint() {
+        let dir = match tempfile::tempdir() {
+            Ok(d) => d,
+            Err(e) => panic!("{e}"),
+        };
+        let state = state_with_policy(
+            dir.path(),
+            r#"permit (principal, action, resource == Tool::"echo");"#,
+        );
+        let audit_path = match state.audit.lock() {
+            Ok(log) => log.path().to_path_buf(),
+            Err(e) => panic!("{e:?}"),
+        };
+        append_raw_line(&audit_path, &serde_json::json!({"seq": 1, "tool": "echo"}));
+
+        let received = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let url = fake_audit_ingest(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            received.clone(),
+        )
+        .await;
+        let control = sample_control_config(url);
+        let mut control_state = sample_control_state();
+        let client = reqwest::Client::new();
+
+        ship_audit_once(&state, &client, &control, &mut control_state).await;
+
+        assert_eq!(control_state.last_shipped_seq, None);
+    }
+
+    #[tokio::test]
+    async fn already_shipped_records_are_not_resent() {
+        let dir = match tempfile::tempdir() {
+            Ok(d) => d,
+            Err(e) => panic!("{e}"),
+        };
+        let state = state_with_policy(
+            dir.path(),
+            r#"permit (principal, action, resource == Tool::"echo");"#,
+        );
+        let audit_path = match state.audit.lock() {
+            Ok(log) => log.path().to_path_buf(),
+            Err(e) => panic!("{e:?}"),
+        };
+        append_raw_line(&audit_path, &serde_json::json!({"seq": 1, "tool": "echo"}));
+        append_raw_line(&audit_path, &serde_json::json!({"seq": 2, "tool": "echo"}));
+
+        let received = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let url = fake_audit_ingest(axum::http::StatusCode::OK, received.clone()).await;
+        let mut control = sample_control_config(url);
+        control.state_path = dir.path().join("control-state.json");
+        let mut control_state = sample_control_state();
+        control_state.last_shipped_seq = Some(1);
+        let client = reqwest::Client::new();
+
+        ship_audit_once(&state, &client, &control, &mut control_state).await;
+
+        assert_eq!(received.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(control_state.last_shipped_seq, Some(2));
     }
 }
