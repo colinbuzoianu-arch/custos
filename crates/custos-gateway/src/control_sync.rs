@@ -430,6 +430,11 @@ async fn poll_once(
                 control_version = bundle.version,
                 "applied synced policy bundle"
             );
+            // The policy and the agents allowed to call it come from the
+            // same signed, verified bundle - applying one without the
+            // other would leave them briefly (or, on a reload failure
+            // above, indefinitely) out of sync with each other.
+            state.apply_synced_agents(&bundle.agents);
             *etag = new_etag;
         }
         Err(e) => {

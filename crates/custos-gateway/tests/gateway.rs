@@ -874,3 +874,32 @@ async fn key_rotation_accepts_tokens_from_either_key() -> anyhow::Result<()> {
     assert_eq!(h.upstream_hits.load(Ordering::SeqCst), 2);
     Ok(())
 }
+
+#[tokio::test]
+async fn synced_agent_token_authenticates_and_is_revoked_by_the_next_sync() -> anyhow::Result<()> {
+    let h = start().await?;
+    let synced_token = "synced-demo-token";
+
+    h.state
+        .apply_synced_agents(&[custos_policy::bundle::BundleAgent {
+            id: uuid::Uuid::new_v4(),
+            name: "synced-agent".into(),
+            token_sha256: Some(hash_token(synced_token)),
+        }]);
+    // Authenticates (never 401) even though this agent is nowhere in the
+    // gateway's own config - only in the "synced" bundle just applied.
+    let status = post_json(&h, Some(synced_token), &tool_call(1, "anything"))
+        .await?
+        .status();
+    assert_ne!(status, 401);
+
+    // The next sync no longer mentions this agent (token rotated, agent
+    // disabled, or removed in Control) - it must stop working immediately,
+    // not linger until a restart.
+    h.state.apply_synced_agents(&[]);
+    let status = post_json(&h, Some(synced_token), &tool_call(2, "anything"))
+        .await?
+        .status();
+    assert_eq!(status, 401);
+    Ok(())
+}

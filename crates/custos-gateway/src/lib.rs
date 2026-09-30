@@ -65,6 +65,14 @@ pub struct AppState {
     /// agent → human owner, for the audit log. Looked up separately from
     /// `agents` so `authenticate` can keep returning a plain `AgentId`.
     pub owners: HashMap<AgentId, Option<String>>,
+    /// Agents most recently seen in a synced, verified policy bundle
+    /// (session 12/18): token hash → agent id. Replaced wholesale on every
+    /// successful sync, never merged with the previous contents — a
+    /// rotated or removed agent's old token stops working the moment the
+    /// next bundle is applied, rather than lingering until a restart.
+    /// Only consulted when `auth = "static"`, alongside `agents` (the
+    /// config-defined set, which this never touches).
+    synced_agents: Mutex<HashMap<String, AgentId>>,
     /// `Mcp-Session-Id` → who created it.
     sessions: Mutex<HashMap<String, SessionEntry>>,
     session_idle_timeout: Duration,
@@ -111,6 +119,7 @@ impl AppState {
             agents,
             verifying_keys,
             owners,
+            synced_agents: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             session_idle_timeout: Duration::from_secs(cfg.session_idle_timeout_secs),
             max_sessions: cfg.max_sessions,
@@ -121,6 +130,25 @@ impl AppState {
             decisions_blocked: AtomicU64::new(0),
             control_approvals,
         })
+    }
+
+    /// Replaces the set of agents trusted via a synced, verified policy
+    /// bundle with exactly what that bundle currently lists — never merged
+    /// with what was there before, so an agent a new bundle stops
+    /// mentioning (token rotated, agent disabled or deleted in Control)
+    /// loses access the moment this runs, not just eventually. Only
+    /// consulted by [`authenticate`] when `auth = "static"`; never touches
+    /// `agents`, the config-defined set.
+    pub fn apply_synced_agents(&self, agents: &[custos_policy::bundle::BundleAgent]) {
+        let mut map = HashMap::with_capacity(agents.len());
+        for agent in agents {
+            if let Some(hash) = &agent.token_sha256 {
+                map.insert(hash.to_lowercase(), AgentId(agent.name.clone()));
+            }
+        }
+        if let Ok(mut guard) = self.synced_agents.lock() {
+            *guard = map;
+        }
     }
 }
 
@@ -233,8 +261,16 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> Option<AgentId> {
         return None;
     }
     match state.auth {
-        // Lookup is by hash, so the plain token is never compared or stored.
-        config::AuthMode::Static => state.agents.get(&hash_token(token)).cloned(),
+        // Lookup is by hash, so the plain token is never compared or
+        // stored. Config-defined agents take priority; a synced bundle is
+        // only ever additional trust, never a way to shadow one.
+        config::AuthMode::Static => {
+            let hash = hash_token(token);
+            state.agents.get(&hash).cloned().or_else(|| {
+                let guard = state.synced_agents.lock().ok()?;
+                guard.get(&hash).cloned()
+            })
+        }
         config::AuthMode::Signed => {
             let payload = custos_tokens::verify(token, &state.verifying_keys, now_unix()).ok()?;
             Some(AgentId(payload.agent))
