@@ -149,11 +149,15 @@ Each session = one branch/commit, `/check` green, `/security-review` before comm
   tenant isolation, and SSE tenant-scoping).
 
 ### Session 14 — dashboard shell
-- [ ] `dashboard/` with Vite + React + TS, router, i18n (EN/DE/RO), API client with CSRF.
-- [ ] Embedded in the control binary; `npm run dev` proxies to local Control for development.
-- [ ] Pages: Login, Overview (decisions today, blocked %, top blocked agents/tools, gateway
-      health), Agents (list, detail, create, disable, issue token).
-- [ ] Accessibility: keyboard navigation, visible focus, 4.5:1 contrast.
+- [x] `dashboard/` with Vite + React + TS, router, i18n (EN/DE/RO), API client with CSRF.
+- [x] `npm run dev` proxies to local Control for development.
+- [ ] Embedded in the control binary — deferred, see docs/decisions/0006-dashboard.md
+      (needs `dashboard/dist/` to exist before `cargo build`, which needs a real
+      build/CI sequencing step first).
+- [ ] Pages: Login ✓, Overview ✓ (decisions today, blocked %, top blocked agents/tools,
+      gateway health), Agents — list ✓, detail/create/disable/issue-token still open.
+- [ ] Accessibility: visible focus and semantic markup are in place, but not verified in
+      an actual browser (no browser available while building this) — needs a real check.
 
 ### Session 15 — dashboard: live decisions, audit, policies
 - [ ] Live decisions page (SSE stream, pause, filter), click-through to the full record.

@@ -134,7 +134,7 @@ async fn viewer_cannot_call_admin_endpoint() {
 
     let state = test_state(f.db);
     let request = match Request::builder()
-        .uri("/admin/ping")
+        .uri("/api/admin/ping")
         .header(
             "cookie",
             format!("{SESSION_COOKIE}={}", logged_in.session_id),
@@ -323,7 +323,7 @@ async fn admin_can_call_admin_endpoint() {
 
     let state = test_state(f.db);
     let request = match Request::builder()
-        .uri("/admin/ping")
+        .uri("/api/admin/ping")
         .header(
             "cookie",
             format!("{SESSION_COOKIE}={}", logged_in.session_id),
@@ -354,7 +354,7 @@ async fn logout_without_csrf_token_is_rejected() {
     let state = test_state(f.db);
     let request = match Request::builder()
         .method("POST")
-        .uri("/logout")
+        .uri("/api/logout")
         .header(
             "cookie",
             format!("{SESSION_COOKIE}={}", logged_in.session_id),
@@ -547,7 +547,7 @@ async fn gateway_bundle_endpoint_authenticates_by_credential() {
     // No bundle published yet, but a valid credential still gets past auth
     // (404, not 401).
     let request = match Request::builder()
-        .uri("/gateways/bundle")
+        .uri("/api/gateways/bundle")
         .header("authorization", format!("Bearer {}", enrolled.credential))
         .body(Body::empty())
     {
@@ -561,7 +561,7 @@ async fn gateway_bundle_endpoint_authenticates_by_credential() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     let bad_request = match Request::builder()
-        .uri("/gateways/bundle")
+        .uri("/api/gateways/bundle")
         .header("authorization", "Bearer wrong-credential")
         .body(Body::empty())
     {
@@ -617,7 +617,7 @@ async fn gateway_bundle_endpoint_returns_304_when_etag_matches() {
     let auth_header = format!("Bearer {}", enrolled.credential);
 
     let first = match Request::builder()
-        .uri("/gateways/bundle")
+        .uri("/api/gateways/bundle")
         .header("authorization", &auth_header)
         .body(Body::empty())
     {
@@ -638,7 +638,7 @@ async fn gateway_bundle_endpoint_returns_304_when_etag_matches() {
     };
 
     let second = match Request::builder()
-        .uri("/gateways/bundle")
+        .uri("/api/gateways/bundle")
         .header("authorization", &auth_header)
         .header("if-none-match", &etag)
         .body(Body::empty())
@@ -682,7 +682,7 @@ async fn heartbeat_updates_the_gateway_row() {
     });
     let request = match Request::builder()
         .method("POST")
-        .uri("/gateways/heartbeat")
+        .uri("/api/gateways/heartbeat")
         .header("authorization", format!("Bearer {}", enrolled.credential))
         .header("content-type", "application/json")
         .body(Body::from(body.to_string()))
@@ -1070,4 +1070,44 @@ async fn overview_aggregates_todays_decisions_and_top_blocked() {
     assert_eq!(overview.top_blocked_tools[0].name, "payroll.read");
     assert_eq!(overview.top_blocked_tools[0].count, 2);
     assert!(overview.gateways.iter().any(|g| g.id == gw.gateway_id));
+}
+
+#[tokio::test]
+#[ignore]
+async fn me_requires_a_session_and_returns_role_and_csrf_token() {
+    let f = fixture(Role::Viewer).await;
+    let limiter = RateLimiter::default();
+    let logged_in =
+        match sessions::login(&f.db, &limiter, &f.tenant_slug, &f.email, f.password).await {
+            Ok(l) => l,
+            Err(e) => panic!("{e}"),
+        };
+    let state = test_state(f.db);
+
+    let anonymous = match Request::builder().uri("/api/me").body(Body::empty()) {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    let anonymous_response = match app(state.clone()).oneshot(anonymous).await {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(anonymous_response.status(), StatusCode::UNAUTHORIZED);
+
+    let authed = match Request::builder()
+        .uri("/api/me")
+        .header(
+            "cookie",
+            format!("{SESSION_COOKIE}={}", logged_in.session_id),
+        )
+        .body(Body::empty())
+    {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    let authed_response = match app(state).oneshot(authed).await {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(authed_response.status(), StatusCode::OK);
 }

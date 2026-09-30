@@ -65,11 +65,15 @@ pub async fn migrate(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
     sqlx::migrate!("./migrations").run(pool).await
 }
 
-pub fn app(state: Arc<AppState>) -> Router {
+/// Everything but `/healthz`, kept separate so it can be nested under
+/// `/api` — the dashboard is a single-page app whose own client-side
+/// routes live at paths like `/agents`, which would otherwise collide with
+/// this API's routes of the same name once both are served from one origin.
+fn api_router() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/healthz", get(|| async { "ok" }))
         .route("/login", post(login_handler))
         .route("/logout", post(logout_handler))
+        .route("/me", get(me_handler))
         .route("/admin/ping", get(|_admin: AdminUser| async { "ok" }))
         .route(
             "/agents",
@@ -101,6 +105,12 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/audit", get(search_audit_handler))
         .route("/audit/stream", get(audit_stream_handler))
         .route("/overview", get(overview_handler))
+}
+
+pub fn app(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/healthz", get(|| async { "ok" }))
+        .nest("/api", api_router())
         .with_state(state)
 }
 
@@ -163,6 +173,17 @@ async fn logout_handler(
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
+}
+
+/// Lets the dashboard recover "am I logged in, and as what role" after a
+/// page refresh — the HttpOnly session cookie survives one, but anything
+/// the page only held in memory (role, CSRF token) doesn't. `401` via
+/// `CurrentUser`'s own extractor is exactly "not logged in."
+async fn me_handler(user: CurrentUser) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "role": user.role.as_str(),
+        "csrf_token": user.csrf_token(),
+    }))
 }
 
 #[derive(Deserialize)]

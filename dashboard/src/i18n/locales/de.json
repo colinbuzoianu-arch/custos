@@ -1,0 +1,56 @@
+{
+  "app": {
+    "name": "Custos Control"
+  },
+  "nav": {
+    "overview": "Übersicht",
+    "agents": "Agenten",
+    "logout": "Abmelden"
+  },
+  "login": {
+    "heading": "Anmelden",
+    "tenant": "Mandant",
+    "email": "E-Mail",
+    "password": "Passwort",
+    "submit": "Anmelden",
+    "submitting": "Anmeldung läuft…",
+    "errorInvalid": "Ungültiger Mandant, E-Mail oder Passwort.",
+    "errorLockedOut": "Zu viele Fehlversuche. Bitte später erneut versuchen.",
+    "errorGeneric": "Etwas ist schiefgelaufen. Bitte versuchen Sie es erneut."
+  },
+  "overview": {
+    "heading": "Übersicht",
+    "decisionsToday": "Entscheidungen heute",
+    "allowed": "Erlaubt",
+    "blocked": "Blockiert",
+    "held": "Zurückgestellt",
+    "blockedPercent": "Blockiert",
+    "topBlockedAgents": "Meistblockierte Agenten",
+    "topBlockedTools": "Meistblockierte Tools",
+    "gatewayHealth": "Gateway-Status",
+    "gatewayName": "Gateway",
+    "lastHeartbeat": "Letzter Heartbeat",
+    "chainStatus": "Kette",
+    "never": "Nie",
+    "noData": "Heute noch keine Entscheidungen."
+  },
+  "agents": {
+    "heading": "Agenten",
+    "name": "Name",
+    "status": "Status",
+    "owner": "Verantwortlich",
+    "expiry": "Ablauf",
+    "create": "Neuer Agent",
+    "disable": "Deaktivieren",
+    "enable": "Aktivieren",
+    "issueToken": "Token ausstellen",
+    "tokenShownOnce": "Dieses Token wird nur einmal angezeigt. Kopieren Sie es jetzt — es kann nicht erneut abgerufen werden.",
+    "confirmDisable": "Diesen Agenten deaktivieren? Er kann sich nach der nächsten Gateway-Synchronisierung nicht mehr authentifizieren."
+  },
+  "common": {
+    "loading": "Wird geladen…",
+    "cancel": "Abbrechen",
+    "save": "Speichern",
+    "close": "Schließen"
+  }
+}

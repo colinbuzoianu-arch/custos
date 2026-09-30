@@ -212,6 +212,14 @@ pub struct CurrentUser {
 }
 
 impl CurrentUser {
+    /// This session's CSRF token — handed back by `/me` so a page refresh
+    /// (which keeps the HttpOnly session cookie but loses anything the
+    /// dashboard only held in memory) can recover it without a fresh
+    /// login.
+    pub fn csrf_token(&self) -> &str {
+        &self.csrf_token
+    }
+
     /// Checks `X-CSRF-Token` against this session's token. Call this in
     /// every handler that mutates state (not needed for a plain read).
     pub fn check_csrf(&self, headers: &HeaderMap) -> Result<(), StatusCode> {

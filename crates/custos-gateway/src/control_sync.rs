@@ -111,7 +111,7 @@ pub async fn enroll(
     state_path: &Path,
 ) -> Result<(), ControlError> {
     let resp = client
-        .post(format!("{control_url}/enroll"))
+        .post(format!("{control_url}/api/enroll"))
         .json(&EnrollRequest {
             token,
             name: gateway_name,
@@ -182,7 +182,7 @@ async fn poll_once(
     etag: &mut Option<String>,
 ) {
     let mut req = client
-        .get(format!("{}/gateways/bundle", control.url))
+        .get(format!("{}/api/gateways/bundle", control.url))
         .bearer_auth(&control_state.credential);
     if let Some(tag) = etag.as_deref() {
         req = req.header(reqwest::header::IF_NONE_MATCH, tag);
@@ -286,7 +286,7 @@ async fn send_heartbeat(
         "decisions_blocked": state.decisions_blocked.load(Ordering::Relaxed),
     });
     let result = client
-        .post(format!("{}/gateways/heartbeat", control.url))
+        .post(format!("{}/api/gateways/heartbeat", control.url))
         .bearer_auth(&control_state.credential)
         .json(&body)
         .send()
@@ -360,7 +360,7 @@ async fn ship_audit_once(
         .max();
 
     let result = client
-        .post(format!("{}/gateways/audit/batch", control.url))
+        .post(format!("{}/api/gateways/audit/batch", control.url))
         .bearer_auth(&control_state.credential)
         .json(&batch)
         .send()
@@ -441,7 +441,7 @@ mod tests {
     /// `/gateways/bundle`, with the given ETag.
     async fn fake_control(bundle_json: String, signature: String, version: i32) -> String {
         let router = Router::new().route(
-            "/gateways/bundle",
+            "/api/gateways/bundle",
             get(move || {
                 let bundle_json = bundle_json.clone();
                 let signature = signature.clone();
@@ -589,7 +589,7 @@ mod tests {
         received_count: Arc<std::sync::atomic::AtomicUsize>,
     ) -> String {
         let router = Router::new().route(
-            "/gateways/audit/batch",
+            "/api/gateways/audit/batch",
             axum::routing::post(
                 move |axum::Json(body): axum::Json<Vec<serde_json::Value>>| {
                     let received_count = received_count.clone();

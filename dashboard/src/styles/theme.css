@@ -1,0 +1,142 @@
+/* Design tokens from docs/decisions/0002-control-plane.md: ink/ivory/rust,
+   Newsreader headings, IBM Plex Sans/Mono body. Font *files* aren't
+   self-hosted yet (no design/dashboard/ mockups exist to source them from)
+   - these stacks fall back to each platform's nearest serif/sans/mono until
+   the real webfonts are added. */
+:root {
+  --color-ink: #16181d;
+  --color-ivory: #f4f1ea;
+  --color-rust: #b3401a;
+  --color-rust-hover: #922f10;
+  --color-border: #d8d3c6;
+  --color-danger: #b3401a;
+  --color-ok: #2f6b3a;
+
+  --font-heading: 'Newsreader', Georgia, 'Times New Roman', serif;
+  --font-body: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'Cascadia Code', monospace;
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 1rem;
+  --space-4: 1.5rem;
+  --space-5: 2.5rem;
+
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-ivory);
+  color: var(--color-ink);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-heading);
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+code,
+pre {
+  font-family: var(--font-mono);
+}
+
+a {
+  color: var(--color-rust);
+}
+
+/* A visible focus ring everywhere, never suppressed - keyboard navigation
+   depends on it (see docs/PLAN.md session 14's accessibility line). */
+:focus-visible {
+  outline: 3px solid var(--color-rust);
+  outline-offset: 2px;
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  border: 1px solid var(--color-ink);
+  background: var(--color-ink);
+  color: var(--color-ivory);
+  border-radius: 4px;
+  padding: var(--space-2) var(--space-3);
+}
+
+button:hover {
+  background: var(--color-rust-hover);
+  border-color: var(--color-rust-hover);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button.secondary {
+  background: transparent;
+  color: var(--color-ink);
+}
+
+button.danger {
+  background: var(--color-danger);
+  border-color: var(--color-danger);
+}
+
+input,
+select {
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: var(--space-2);
+  background: white;
+}
+
+label {
+  display: block;
+  margin-bottom: var(--space-1);
+  font-weight: 600;
+}
+
+.field {
+  margin-bottom: var(--space-3);
+}
+
+.error-text {
+  color: var(--color-danger);
+  font-size: 0.9rem;
+}
+
+/* Screen-reader-only text: visually hidden, still announced, still in the
+   tab order's accessible name computation. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

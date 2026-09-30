@@ -1,0 +1,56 @@
+{
+  "app": {
+    "name": "Custos Control"
+  },
+  "nav": {
+    "overview": "Overview",
+    "agents": "Agents",
+    "logout": "Log out"
+  },
+  "login": {
+    "heading": "Sign in",
+    "tenant": "Tenant",
+    "email": "Email",
+    "password": "Password",
+    "submit": "Sign in",
+    "submitting": "Signing in…",
+    "errorInvalid": "Invalid tenant, email, or password.",
+    "errorLockedOut": "Too many failed attempts. Try again later.",
+    "errorGeneric": "Something went wrong. Please try again."
+  },
+  "overview": {
+    "heading": "Overview",
+    "decisionsToday": "Decisions today",
+    "allowed": "Allowed",
+    "blocked": "Blocked",
+    "held": "Held",
+    "blockedPercent": "Blocked",
+    "topBlockedAgents": "Top blocked agents",
+    "topBlockedTools": "Top blocked tools",
+    "gatewayHealth": "Gateway health",
+    "gatewayName": "Gateway",
+    "lastHeartbeat": "Last heartbeat",
+    "chainStatus": "Chain",
+    "never": "Never",
+    "noData": "No decisions yet today."
+  },
+  "agents": {
+    "heading": "Agents",
+    "name": "Name",
+    "status": "Status",
+    "owner": "Owner",
+    "expiry": "Expiry",
+    "create": "New agent",
+    "disable": "Disable",
+    "enable": "Enable",
+    "issueToken": "Issue token",
+    "tokenShownOnce": "This token is shown once. Copy it now — it can't be retrieved again.",
+    "confirmDisable": "Disable this agent? It will no longer be able to authenticate once its gateway syncs."
+  },
+  "common": {
+    "loading": "Loading…",
+    "cancel": "Cancel",
+    "save": "Save",
+    "close": "Close"
+  }
+}

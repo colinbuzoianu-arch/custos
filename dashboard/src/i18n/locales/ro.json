@@ -1,0 +1,56 @@
+{
+  "app": {
+    "name": "Custos Control"
+  },
+  "nav": {
+    "overview": "Prezentare generală",
+    "agents": "Agenți",
+    "logout": "Deconectare"
+  },
+  "login": {
+    "heading": "Autentificare",
+    "tenant": "Client",
+    "email": "E-mail",
+    "password": "Parolă",
+    "submit": "Autentificare",
+    "submitting": "Se autentifică…",
+    "errorInvalid": "Client, e-mail sau parolă incorecte.",
+    "errorLockedOut": "Prea multe încercări eșuate. Încercați din nou mai târziu.",
+    "errorGeneric": "A apărut o eroare. Vă rugăm să încercați din nou."
+  },
+  "overview": {
+    "heading": "Prezentare generală",
+    "decisionsToday": "Decizii azi",
+    "allowed": "Permise",
+    "blocked": "Blocate",
+    "held": "În așteptare",
+    "blockedPercent": "Blocate",
+    "topBlockedAgents": "Cei mai blocați agenți",
+    "topBlockedTools": "Cele mai blocate instrumente",
+    "gatewayHealth": "Stare gateway",
+    "gatewayName": "Gateway",
+    "lastHeartbeat": "Ultimul semnal",
+    "chainStatus": "Lanț",
+    "never": "Niciodată",
+    "noData": "Nicio decizie azi încă."
+  },
+  "agents": {
+    "heading": "Agenți",
+    "name": "Nume",
+    "status": "Stare",
+    "owner": "Responsabil",
+    "expiry": "Expirare",
+    "create": "Agent nou",
+    "disable": "Dezactivează",
+    "enable": "Activează",
+    "issueToken": "Emite token",
+    "tokenShownOnce": "Acest token este afișat o singură dată. Copiați-l acum — nu mai poate fi recuperat.",
+    "confirmDisable": "Dezactivați acest agent? Nu se va mai putea autentifica după următoarea sincronizare a gateway-ului."
+  },
+  "common": {
+    "loading": "Se încarcă…",
+    "cancel": "Anulează",
+    "save": "Salvează",
+    "close": "Închide"
+  }
+}
