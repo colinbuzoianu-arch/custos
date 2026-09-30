@@ -717,6 +717,7 @@ fn approvals_error_response(e: approvals::ApprovalsError) -> axum::response::Res
         approvals::ApprovalsError::NotFound => StatusCode::NOT_FOUND.into_response(),
         approvals::ApprovalsError::AlreadyResolved => StatusCode::CONFLICT.into_response(),
         approvals::ApprovalsError::FourEyesViolation => StatusCode::FORBIDDEN.into_response(),
+        approvals::ApprovalsError::UnknownAgent => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
         approvals::ApprovalsError::Db(e) => {
             tracing::error!(error = %e, "approvals db error");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()

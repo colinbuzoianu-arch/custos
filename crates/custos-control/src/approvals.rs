@@ -21,6 +21,8 @@ pub enum ApprovalsError {
     AlreadyResolved,
     #[error("the agent's own owner cannot resolve a four-eyes hold")]
     FourEyesViolation,
+    #[error("cannot resolve a four-eyes approval for an agent Control has no record of")]
+    UnknownAgent,
 }
 
 #[derive(Debug, Serialize)]
@@ -177,8 +179,19 @@ pub async fn resolve(
                 .bind(&approval.agent)
                 .fetch_optional(pool)
                 .await?;
-        if owner.and_then(|(o,)| o) == Some(approver_user_id) {
-            return Err(ApprovalsError::FourEyesViolation);
+        match owner {
+            // The agent isn't in Control's own table at all (e.g. a
+            // statically-configured gateway agent that was never created
+            // via the API) - we have no way to know whether resolving
+            // this would violate four-eyes, so refuse rather than assume
+            // it's fine. This is different from an agent that *is*
+            // registered but has no owner set, which is a known "nobody
+            // to exclude" and resolves normally.
+            None => return Err(ApprovalsError::UnknownAgent),
+            Some((Some(owner_id),)) if owner_id == approver_user_id => {
+                return Err(ApprovalsError::FourEyesViolation);
+            }
+            Some(_) => {}
         }
     }
 

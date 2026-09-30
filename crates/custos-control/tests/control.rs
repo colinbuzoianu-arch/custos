@@ -1508,3 +1508,162 @@ async fn evidence_endpoint_rejects_a_malformed_date() {
     };
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+#[ignore]
+async fn four_eyes_fails_closed_when_the_agent_is_unknown_to_control() {
+    let f = fixture(Role::Admin).await;
+    let gw = enrolled_gateway(&f, "gw-approval-unknown-agent").await;
+
+    // "never-registered-agent" is never created via agents::create_agent -
+    // a statically-configured gateway agent that Control has no row for.
+    let created = match approvals::create(
+        &f.db,
+        f.tenant_id,
+        NewApproval {
+            gateway_id: gw.gateway_id,
+            agent: "never-registered-agent",
+            tool: "payroll.run",
+            findings: None,
+            reason: "needs a second pair of eyes",
+            four_eyes: true,
+        },
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(e) => panic!("{e}"),
+    };
+
+    let result =
+        approvals::resolve(&f.db, f.tenant_id, created.id, Uuid::new_v4(), true, None).await;
+    assert!(matches!(result, Err(ApprovalsError::UnknownAgent)));
+
+    // Nothing was written - the approval is still pending, not silently
+    // resolved.
+    let still_pending = match approvals::get(&f.db, f.tenant_id, created.id).await {
+        Ok(a) => a,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(still_pending.status, "pending");
+}
+
+#[tokio::test]
+#[ignore]
+async fn approve_and_reject_endpoints_reject_non_approvers() {
+    let f = fixture(Role::Viewer).await;
+    let limiter = RateLimiter::default();
+    let logged_in =
+        match sessions::login(&f.db, &limiter, &f.tenant_slug, &f.email, f.password).await {
+            Ok(l) => l,
+            Err(e) => panic!("{e}"),
+        };
+    let state = test_state(f.db);
+    let fake_id = Uuid::new_v4();
+
+    for path in [
+        format!("/api/approvals/{fake_id}/approve"),
+        format!("/api/approvals/{fake_id}/reject"),
+    ] {
+        let request = match Request::builder()
+            .method("POST")
+            .uri(&path)
+            .header(
+                "cookie",
+                format!("{SESSION_COOKIE}={}", logged_in.session_id),
+            )
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+        {
+            Ok(r) => r,
+            Err(e) => panic!("{e}"),
+        };
+        let response = match app(state.clone()).oneshot(request).await {
+            Ok(r) => r,
+            Err(e) => panic!("{e}"),
+        };
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn gateway_cannot_poll_another_tenants_approval() {
+    let f1 = fixture(Role::Admin).await;
+    let gw1 = enrolled_gateway(&f1, "gw-tenant-a").await;
+    let created = match approvals::create(
+        &f1.db,
+        f1.tenant_id,
+        NewApproval {
+            gateway_id: gw1.gateway_id,
+            agent: "some-agent",
+            tool: "payroll.run",
+            findings: None,
+            reason: "needs a human",
+            four_eyes: false,
+        },
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(e) => panic!("{e}"),
+    };
+
+    let f2 = fixture(Role::Admin).await;
+    let gw2 = enrolled_gateway(&f2, "gw-tenant-b").await;
+    // Tenant B's gateway, even with a valid credential, must never see
+    // tenant A's approval - not found, not another tenant's leaked data.
+    let result = approvals::get_for_gateway(&f1.db, f2.tenant_id, gw2.gateway_id, created.id).await;
+    assert!(matches!(result, Err(ApprovalsError::NotFound)));
+}
+
+#[tokio::test]
+#[ignore]
+async fn evidence_never_includes_another_tenants_data() {
+    let f1 = fixture(Role::Admin).await;
+    let gw1 = enrolled_gateway(&f1, "gw-evidence-a").await;
+    if let Err(e) = audit::ingest_batch(
+        &f1.db,
+        f1.tenant_id,
+        gw1.gateway_id,
+        &[fake_record(
+            1,
+            &"0".repeat(64),
+            "h1",
+            "sap.read_invoice",
+            "ALLOW",
+        )],
+    )
+    .await
+    {
+        panic!("{e}");
+    }
+    if let Err(e) =
+        agents::create_agent(&f1.db, f1.tenant_id, "tenant-a-agent", None, None, None).await
+    {
+        panic!("{e}");
+    }
+
+    let f2 = fixture(Role::Admin).await;
+    let from = match time::OffsetDateTime::parse(
+        "2020-01-01T00:00:00Z",
+        &time::format_description::well_known::Rfc3339,
+    ) {
+        Ok(t) => t,
+        Err(e) => panic!("{e}"),
+    };
+    let to = match time::OffsetDateTime::parse(
+        "2030-01-01T00:00:00Z",
+        &time::format_description::well_known::Rfc3339,
+    ) {
+        Ok(t) => t,
+        Err(e) => panic!("{e}"),
+    };
+    let report = match evidence::gather(&f1.db, f2.tenant_id, from, to).await {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    assert!(report.agents.is_empty());
+    assert_eq!(report.decisions.allow, 0);
+    assert!(report.gateways.is_empty());
+}
