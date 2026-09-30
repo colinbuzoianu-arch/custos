@@ -10,6 +10,7 @@ pub mod agents;
 pub mod audit;
 pub mod config;
 pub mod gateways;
+pub mod overview;
 pub mod policies;
 pub mod sessions;
 pub mod users;
@@ -99,6 +100,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/gateways/audit/batch", post(ingest_audit_batch_handler))
         .route("/audit", get(search_audit_handler))
         .route("/audit/stream", get(audit_stream_handler))
+        .route("/overview", get(overview_handler))
         .with_state(state)
 }
 
@@ -738,6 +740,20 @@ async fn audit_stream_handler(
 > {
     let stream = audit_event_stream(state.audit_events.subscribe(), user.tenant_id);
     axum::response::sse::Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
+}
+
+async fn overview_handler(
+    State(state): State<Arc<AppState>>,
+    user: CurrentUser,
+) -> impl IntoResponse {
+    match overview::get_overview(&state.db, user.tenant_id).await {
+        Ok(overview) => Json(overview).into_response(),
+        Err(overview::OverviewError::Db(e)) => {
+            tracing::error!(error = %e, "overview db error");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        Err(overview::OverviewError::Gateways(e)) => gateways_error_response(e),
+    }
 }
 
 #[cfg(test)]

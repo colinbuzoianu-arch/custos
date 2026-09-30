@@ -1043,3 +1043,31 @@ async fn search_pagination_walks_every_record_exactly_once() {
     }
     assert_eq!(seen.len(), 5);
 }
+
+#[tokio::test]
+#[ignore]
+async fn overview_aggregates_todays_decisions_and_top_blocked() {
+    let f = fixture(Role::Admin).await;
+    let gw = enrolled_gateway(&f, "gw-overview").await;
+
+    let records = vec![
+        fake_record(1, &"0".repeat(64), "h1", "payroll.read", "BLOCK"),
+        fake_record(2, "h1", "h2", "payroll.read", "BLOCK"),
+        fake_record(3, "h2", "h3", "echo", "ALLOW"),
+    ];
+    if let Err(e) = audit::ingest_batch(&f.db, f.tenant_id, gw.gateway_id, &records).await {
+        panic!("{e}");
+    }
+
+    let overview = match custos_control::overview::get_overview(&f.db, f.tenant_id).await {
+        Ok(o) => o,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(overview.decisions_today.allow, 1);
+    assert_eq!(overview.decisions_today.block, 2);
+    assert!((overview.blocked_percent - (200.0 / 3.0)).abs() < 0.01);
+    assert_eq!(overview.top_blocked_tools.len(), 1);
+    assert_eq!(overview.top_blocked_tools[0].name, "payroll.read");
+    assert_eq!(overview.top_blocked_tools[0].count, 2);
+    assert!(overview.gateways.iter().any(|g| g.id == gw.gateway_id));
+}
