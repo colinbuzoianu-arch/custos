@@ -80,6 +80,31 @@ pub struct Config {
     pub signing_keys: Vec<SigningKeyConfig>,
     #[serde(default)]
     pub agents: Vec<AgentConfig>,
+    /// Sync with Custos Control. Optional — a gateway with no `[control]`
+    /// section behaves exactly as it always has, enforcing whatever's in
+    /// `policy_dir` with no outbound calls to anything. Enroll first with
+    /// `custos enroll`, which writes `state_path`.
+    #[serde(default)]
+    pub control: Option<ControlConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlConfig {
+    /// Base URL of the Control instance, e.g. `https://control.example.com`.
+    pub url: String,
+    /// Where `custos enroll` wrote this gateway's id, credential, and
+    /// Control's pinned public key. Read on every start; if it's missing,
+    /// sync is skipped (with a warning) rather than refusing to start.
+    pub state_path: PathBuf,
+    /// How often to poll for a new policy bundle and send a heartbeat.
+    /// Default 30s.
+    #[serde(default = "default_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+}
+
+fn default_poll_interval_secs() -> u64 {
+    30
 }
 
 fn default_session_idle_timeout_secs() -> u64 {

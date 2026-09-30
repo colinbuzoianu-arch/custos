@@ -64,3 +64,14 @@ auth = "static"
 id = "invoice-processor"
 owner = "finance-lead"
 token_sha256 = "REPLACE_WITH_HASH"
+
+# Optional: sync policy from Custos Control instead of (or alongside)
+# hand-edited files in policy_dir. Enroll once first:
+#   cargo run -p custos-gateway -- enroll --control https://control.example.com \
+#     --token <one-time-token-from-an-admin> --state-path data/control-state.json
+# which writes state_path. With no [control] section, the gateway never
+# makes an outbound call to Control and behaves exactly as it always has.
+# [control]
+# url = "https://control.example.com"
+# state_path = "data/control-state.json"
+# poll_interval_secs = 30

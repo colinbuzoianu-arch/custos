@@ -39,7 +39,7 @@ hostname = "0.4"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-time = { version = "0.3", features = ["formatting", "serde"] }
+time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
 tempfile = "3"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "migrate", "macros", "time", "uuid"] }
 uuid = { version = "1", features = ["v4", "serde"] }

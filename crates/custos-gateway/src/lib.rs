@@ -6,6 +6,7 @@
 //! Anything the gateway cannot understand is rejected: fail closed.
 
 pub mod config;
+pub mod control_sync;
 
 use axum::{
     Router,
@@ -23,6 +24,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -70,6 +72,11 @@ pub struct AppState {
     pub upstream: String,
     pub upstream_authorization: Option<String>,
     pub client: reqwest::Client,
+    /// Cumulative since this process started — reported in the
+    /// heartbeat to Custos Control (session 12), never reset between
+    /// heartbeats.
+    pub decisions_allowed: AtomicU64,
+    pub decisions_blocked: AtomicU64,
 }
 
 impl AppState {
@@ -101,6 +108,8 @@ impl AppState {
             upstream: cfg.upstream.clone(),
             upstream_authorization: cfg.upstream_authorization.clone(),
             client: reqwest::Client::new(),
+            decisions_allowed: AtomicU64::new(0),
+            decisions_blocked: AtomicU64::new(0),
         })
     }
 }
@@ -392,6 +401,7 @@ async fn audit_session_violation(state: &Arc<AppState>, agent: &AgentId, session
     if !audited {
         tracing::error!(agent = %agent, session_id, "failed to audit a session reuse attempt");
     }
+    state.decisions_blocked.fetch_add(1, Ordering::Relaxed);
     tracing::warn!(agent = %agent, session_id, "blocked: session belongs to another agent");
 }
 
@@ -480,6 +490,12 @@ async fn check_tool_call(state: &Arc<AppState>, agent: &AgentId, msg: &Value) ->
         return Some((StatusCode::SERVICE_UNAVAILABLE, "audit log unavailable").into_response());
     }
 
+    match &decision {
+        Decision::Allow => state.decisions_allowed.fetch_add(1, Ordering::Relaxed),
+        Decision::Block { .. } | Decision::Hold { .. } => {
+            state.decisions_blocked.fetch_add(1, Ordering::Relaxed)
+        }
+    };
     tracing::info!(agent = %agent, tool, decision = ?decision, "tool call");
     match decision {
         Decision::Allow => None,

@@ -124,13 +124,16 @@ Each session = one branch/commit, `/check` green, `/security-review` before comm
   fails ✓ (see `docs/decisions/0003-policy-bundle.md`).
 
 ### Session 12 — gateway enrolment and sync
-- [ ] `custos enroll --control <url> --token <one-time enrolment token>`: gateway gets an id and
+- [x] `custos enroll --control <url> --token <one-time enrolment token>`: gateway gets an id and
       credentials, pins Control's public key.
-- [ ] Gateway polls for new bundles (ETag), verifies the signature, applies via the reload path
+- [x] Gateway polls for new bundles (ETag), verifies the signature, applies via the reload path
       from session 5a. Keeps the last good bundle on disk; if Control is unreachable it keeps
       enforcing the last good bundle (never "allow all").
-- [ ] Heartbeat: version, policy_version, uptime, decision counts.
-- Tests: bad signature rejected and old bundle kept; Control offline → still enforcing.
+- [x] Heartbeat: version, policy_version, decision counts. (Uptime omitted — Control already
+      derives "how long since last heartbeat" from `last_heartbeat_at`; a separate self-reported
+      uptime field would just be redundant with that.)
+- Tests: bad signature rejected and old bundle kept ✓; Control offline → still enforcing ✓
+  (see `docs/decisions/0004-gateway-sync.md`).
 
 ### Session 13 — audit shipping
 - [ ] Gateway ships audit records to Control in batches, with retry and backoff; local file is

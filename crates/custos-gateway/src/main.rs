@@ -52,6 +52,23 @@ enum Cmd {
         #[arg(long)]
         key_id: String,
     },
+    /// Enroll with Custos Control: exchange a one-time enrollment token
+    /// (issued by an admin in Control) for this gateway's permanent
+    /// credential and Control's public key, writing both to `--state-path`.
+    /// Run this once before starting a gateway whose config has a
+    /// `[control]` section.
+    Enroll {
+        #[arg(long)]
+        control: String,
+        #[arg(long)]
+        token: String,
+        /// How this gateway shows up in Control. Defaults to the machine's
+        /// hostname.
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, default_value = "data/control-state.json")]
+        state_path: PathBuf,
+    },
 }
 
 /// Parses a duration like `30m`, `1h`, `2d` into seconds. Hand-rolled rather
@@ -92,6 +109,9 @@ async fn main() -> anyhow::Result<()> {
             let _policy_watcher =
                 custos_gateway::spawn_policy_reload_triggers(state.clone(), watch_policies)?;
             custos_gateway::spawn_session_expiry_sweep(state.clone());
+            if let Some(control) = cfg.control.clone() {
+                custos_gateway::control_sync::spawn(state.clone(), control);
+            }
             let listener = tokio::net::TcpListener::bind(cfg.listen).await?;
             tracing::info!(listen = %cfg.listen, upstream = %cfg.upstream, agents = cfg.agents.len(), watch_policies, "custos gateway started");
             axum::serve(listener, app(state)).await?;
@@ -195,6 +215,40 @@ async fn main() -> anyhow::Result<()> {
                 &key_id,
             );
             println!("{token}");
+        }
+        Cmd::Enroll {
+            control,
+            token,
+            name,
+            state_path,
+        } => {
+            let name = name.unwrap_or_else(|| {
+                hostname::get()
+                    .ok()
+                    .and_then(|h| h.into_string().ok())
+                    .unwrap_or_else(|| "custos-gateway".into())
+            });
+            if let Some(parent) = state_path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::create_dir_all(parent)?;
+            }
+            let client = reqwest::Client::new();
+            match custos_gateway::control_sync::enroll(
+                &client,
+                &control,
+                &token,
+                &name,
+                &state_path,
+            )
+            .await
+            {
+                Ok(()) => println!("OK: enrolled as {name:?}, wrote {}", state_path.display()),
+                Err(e) => {
+                    eprintln!("FAILED: {e}");
+                    std::process::exit(1);
+                }
+            }
         }
     }
     Ok(())

@@ -74,6 +74,7 @@ async fn start_with_upstream(
             owner: Some("finance".into()),
             token_sha256: hash_token(TOKEN),
         }],
+        control: None,
     };
     let state = Arc::new(AppState::from_config(&cfg)?);
     let gw = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -275,6 +276,7 @@ async fn hash_mode_without_key_id_fails_to_start() -> anyhow::Result<()> {
         auth: config::AuthMode::Static,
         signing_keys: vec![],
         agents: vec![],
+        control: None,
     };
     assert!(AppState::from_config(&cfg).is_err());
     Ok(())
@@ -549,6 +551,7 @@ async fn start_with_two_agents(
                 token_sha256: hash_token(TOKEN_B),
             },
         ],
+        control: None,
     };
     let state = Arc::new(AppState::from_config(&cfg)?);
     let gw = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -714,6 +717,7 @@ async fn start_with_signed_auth(
         auth: config::AuthMode::Signed,
         signing_keys,
         agents: vec![],
+        control: None,
     };
     let state = Arc::new(AppState::from_config(&cfg)?);
     let gw = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
