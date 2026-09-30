@@ -1,0 +1,33 @@
+[package]
+name = "custos-control"
+description = "Custos Control: multi-gateway management, audit search, approvals. Commercial - see NOTICE.md."
+version.workspace = true
+edition.workspace = true
+license = "LicenseRef-Proprietary"
+rust-version.workspace = true
+
+[[bin]]
+name = "custos-control"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tokio.workspace = true
+axum = { workspace = true, features = ["macros"] }
+sqlx.workspace = true
+uuid.workspace = true
+time.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tower = { version = "0.5", features = ["util"] }
+
+[lints]
+workspace = true

@@ -15,6 +15,7 @@ custos-policy = { path = "crates/custos-policy" }
 custos-audit = { path = "crates/custos-audit" }
 custos-inspect = { path = "crates/custos-inspect" }
 custos-tokens = { path = "crates/custos-tokens" }
+custos-control = { path = "crates/custos-control" }
 
 anyhow = "1"
 thiserror = "2"
@@ -40,6 +41,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 time = { version = "0.3", features = ["formatting", "serde"] }
 tempfile = "3"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "migrate", "macros", "time", "uuid"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

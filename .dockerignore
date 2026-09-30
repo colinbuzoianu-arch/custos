@@ -1,5 +1,6 @@
 target/
 data/
 config/custos.toml
+config/custos-control.toml
 .env
 .git

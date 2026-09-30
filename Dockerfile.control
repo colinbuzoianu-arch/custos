@@ -1,0 +1,20 @@
+# syntax=docker/dockerfile:1
+
+# See Dockerfile (the gateway's) for why bookworm/distroless are paired.
+FROM rust:1.88-bookworm AS builder
+WORKDIR /app
+COPY . .
+RUN cargo build --release -p custos-control
+
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY --from=builder /app/target/release/custos-control /usr/local/bin/custos-control
+
+USER nonroot
+EXPOSE 8788
+
+# No HEALTHCHECK yet: unlike the gateway, custos-control has no
+# `healthcheck` subcommand of its own yet (distroless has no curl/shell to
+# call /healthz directly). Follow-up, not this session's scope.
+
+ENTRYPOINT ["/usr/local/bin/custos-control"]
+CMD ["run", "--config", "/etc/custos-control/custos-control.toml"]

@@ -1,0 +1,8 @@
+# Used by docker-compose.control.yml — bind-mounted read-only into the
+# container at /etc/custos-control/custos-control.toml.
+
+listen = "0.0.0.0:8788"
+
+# "postgres" is the other compose service; containers reach each other by
+# service name on the compose network.
+database_url = "postgres://custos:custos@postgres/custos_control"

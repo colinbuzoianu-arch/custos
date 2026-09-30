@@ -1,6 +1,7 @@
 /target
 /data
 config/custos.toml
+config/custos-control.toml
 *.jsonl
 .env
 .DS_Store

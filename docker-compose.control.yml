@@ -1,0 +1,28 @@
+# Demo/dev only: the "custos"/"custos" credentials below are not meant for
+# a real deployment — set real ones (and point database_url at them) before
+# running this anywhere reachable.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=custos
+      - POSTGRES_PASSWORD=custos
+      - POSTGRES_DB=custos_control
+    volumes:
+      - custos-control-db:/var/lib/postgresql/data
+    expose:
+      - "5432"
+
+  control:
+    build:
+      context: .
+      dockerfile: Dockerfile.control
+    depends_on:
+      - postgres
+    ports:
+      - "127.0.0.1:8788:8788"
+    volumes:
+      - ./config/custos-control.docker.toml:/etc/custos-control/custos-control.toml:ro
+
+volumes:
+  custos-control-db:

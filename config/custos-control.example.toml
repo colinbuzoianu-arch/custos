@@ -1,0 +1,6 @@
+# Copy to config/custos-control.toml (git-ignored) and adjust, for a local
+# `cargo run` setup against a Postgres you run yourself. For the bundled
+# demo instead, see docker-compose.control.yml.
+
+listen = "127.0.0.1:8788"
+database_url = "postgres://custos:custos@localhost/custos_control"
