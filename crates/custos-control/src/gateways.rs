@@ -173,6 +173,11 @@ pub struct Gateway {
     pub last_policy_version: Option<String>,
     pub decisions_allowed: i64,
     pub decisions_blocked: i64,
+    pub last_ingested_seq: Option<i64>,
+    /// `"ok"`, `"gap"`, or `"broken"` — see `audit::ingest_batch`. Once a
+    /// gap or break is flagged, later good records never quietly clear it.
+    pub chain_status: String,
+    pub chain_issue: Option<String>,
 }
 
 type GatewayRow = (
@@ -184,6 +189,9 @@ type GatewayRow = (
     Option<String>,
     i64,
     i64,
+    Option<i64>,
+    String,
+    Option<String>,
 );
 
 fn row_to_gateway(row: GatewayRow) -> Gateway {
@@ -196,6 +204,9 @@ fn row_to_gateway(row: GatewayRow) -> Gateway {
         last_policy_version,
         decisions_allowed,
         decisions_blocked,
+        last_ingested_seq,
+        chain_status,
+        chain_issue,
     ) = row;
     Gateway {
         id,
@@ -206,10 +217,13 @@ fn row_to_gateway(row: GatewayRow) -> Gateway {
         last_policy_version,
         decisions_allowed,
         decisions_blocked,
+        last_ingested_seq,
+        chain_status,
+        chain_issue,
     }
 }
 
-const GATEWAY_COLUMNS: &str = "id, name, enrolled_at, last_heartbeat_at, last_version, last_policy_version, decisions_allowed, decisions_blocked";
+const GATEWAY_COLUMNS: &str = "id, name, enrolled_at, last_heartbeat_at, last_version, last_policy_version, decisions_allowed, decisions_blocked, last_ingested_seq, chain_status, chain_issue";
 
 pub async fn list_gateways(pool: &PgPool, tenant_id: Uuid) -> Result<Vec<Gateway>, GatewaysError> {
     let sql = format!(
@@ -217,6 +231,20 @@ pub async fn list_gateways(pool: &PgPool, tenant_id: Uuid) -> Result<Vec<Gateway
     );
     let rows: Vec<GatewayRow> = sqlx::query_as(&sql).bind(tenant_id).fetch_all(pool).await?;
     Ok(rows.into_iter().map(row_to_gateway).collect())
+}
+
+pub async fn get_gateway(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Gateway, GatewaysError> {
+    let sql = format!("select {GATEWAY_COLUMNS} from gateways where tenant_id = $1 and id = $2");
+    let row: Option<GatewayRow> = sqlx::query_as(&sql)
+        .bind(tenant_id)
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    row.map(row_to_gateway).ok_or(GatewaysError::NotFound)
 }
 
 /// Records a heartbeat: the gateway's binary version, the local hash of the

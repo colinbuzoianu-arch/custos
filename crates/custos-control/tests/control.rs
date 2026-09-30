@@ -8,6 +8,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use custos_control::agents::{self, AgentPatch, AgentsError, Status};
+use custos_control::audit;
 use custos_control::gateways::{self, GatewaysError};
 use custos_control::policies::{self, PoliciesError};
 use custos_control::sessions::{self, RateLimiter, SESSION_COOKIE};
@@ -706,4 +707,208 @@ async fn heartbeat_updates_the_gateway_row() {
     assert_eq!(gw.decisions_blocked, 2);
     assert_eq!(gw.last_version.as_deref(), Some("0.1.0"));
     assert!(gw.last_heartbeat_at.is_some());
+}
+
+async fn enrolled_gateway(f: &Fixture, name: &str) -> gateways::Enrolled {
+    let token = match gateways::create_enroll_token(
+        &f.db,
+        f.tenant_id,
+        f.user_id,
+        time::Duration::hours(1),
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => panic!("{e}"),
+    };
+    match gateways::enroll(&f.db, &token, name).await {
+        Ok(e) => e,
+        Err(e) => panic!("{e}"),
+    }
+}
+
+fn fake_record(
+    seq: u64,
+    prev_hash: &str,
+    hash: &str,
+    tool: &str,
+    verdict: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "v": 4,
+        "seq": seq,
+        "ts": "2026-09-30T12:00:00Z",
+        "agent": "test-agent",
+        "owner": null,
+        "tool": tool,
+        "arguments": null,
+        "decision": { "verdict": verdict },
+        "gateway_instance": "test-instance",
+        "policy_version": "abc123",
+        "findings": [],
+        "prev_hash": prev_hash,
+        "hash": hash,
+    })
+}
+
+#[tokio::test]
+#[ignore]
+async fn duplicate_audit_batch_is_a_noop() {
+    let f = fixture(Role::Admin).await;
+    let gw = enrolled_gateway(&f, "gw-audit-dup").await;
+
+    let batch = vec![
+        fake_record(1, "0".repeat(64).as_str(), "h1", "echo", "ALLOW"),
+        fake_record(2, "h1", "h2", "echo", "ALLOW"),
+    ];
+
+    let first = match audit::ingest_batch(&f.db, f.tenant_id, gw.gateway_id, &batch).await {
+        Ok(o) => o,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(first.inserted, 2);
+    assert_eq!(first.duplicates, 0);
+
+    let second = match audit::ingest_batch(&f.db, f.tenant_id, gw.gateway_id, &batch).await {
+        Ok(o) => o,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(second.inserted, 0);
+    assert_eq!(second.duplicates, 2);
+
+    let count: (i64,) =
+        match sqlx::query_as("select count(*) from audit_records where gateway_id = $1")
+            .bind(gw.gateway_id)
+            .fetch_one(&f.db)
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => panic!("{e}"),
+        };
+    assert_eq!(count.0, 2);
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_seq_gap_is_flagged_and_stays_flagged() {
+    let f = fixture(Role::Admin).await;
+    let gw = enrolled_gateway(&f, "gw-audit-gap").await;
+
+    if let Err(e) = audit::ingest_batch(
+        &f.db,
+        f.tenant_id,
+        gw.gateway_id,
+        &[fake_record(1, &"0".repeat(64), "h1", "echo", "ALLOW")],
+    )
+    .await
+    {
+        panic!("{e}");
+    }
+    // seq 2 is skipped entirely.
+    if let Err(e) = audit::ingest_batch(
+        &f.db,
+        f.tenant_id,
+        gw.gateway_id,
+        &[fake_record(3, "h1", "h3", "echo", "ALLOW")],
+    )
+    .await
+    {
+        panic!("{e}");
+    }
+
+    let gateway = match gateways::get_gateway(&f.db, f.tenant_id, gw.gateway_id).await {
+        Ok(g) => g,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(gateway.chain_status, "gap");
+    assert!(gateway.chain_issue.is_some());
+
+    // A subsequent, perfectly-linked record must not clear the flag.
+    if let Err(e) = audit::ingest_batch(
+        &f.db,
+        f.tenant_id,
+        gw.gateway_id,
+        &[fake_record(4, "h3", "h4", "echo", "ALLOW")],
+    )
+    .await
+    {
+        panic!("{e}");
+    }
+    let gateway = match gateways::get_gateway(&f.db, f.tenant_id, gw.gateway_id).await {
+        Ok(g) => g,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(gateway.chain_status, "gap");
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_mismatched_prev_hash_is_flagged_as_broken() {
+    let f = fixture(Role::Admin).await;
+    let gw = enrolled_gateway(&f, "gw-audit-broken").await;
+
+    if let Err(e) = audit::ingest_batch(
+        &f.db,
+        f.tenant_id,
+        gw.gateway_id,
+        &[fake_record(1, &"0".repeat(64), "h1", "echo", "ALLOW")],
+    )
+    .await
+    {
+        panic!("{e}");
+    }
+    // seq is contiguous, but prev_hash doesn't match the last ingested hash.
+    if let Err(e) = audit::ingest_batch(
+        &f.db,
+        f.tenant_id,
+        gw.gateway_id,
+        &[fake_record(2, "not-h1", "h2", "echo", "ALLOW")],
+    )
+    .await
+    {
+        panic!("{e}");
+    }
+
+    let gateway = match gateways::get_gateway(&f.db, f.tenant_id, gw.gateway_id).await {
+        Ok(g) => g,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(gateway.chain_status, "broken");
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_verdict_is_searchable_after_ingest() {
+    let f = fixture(Role::Admin).await;
+    let gw = enrolled_gateway(&f, "gw-audit-search").await;
+
+    if let Err(e) = audit::ingest_batch(
+        &f.db,
+        f.tenant_id,
+        gw.gateway_id,
+        &[fake_record(
+            1,
+            &"0".repeat(64),
+            "h1",
+            "payroll.read",
+            "BLOCK",
+        )],
+    )
+    .await
+    {
+        panic!("{e}");
+    }
+
+    let row: (Option<String>, Option<String>) = match sqlx::query_as(
+        "select tool, verdict from audit_records where gateway_id = $1 and seq = 1",
+    )
+    .bind(gw.gateway_id)
+    .fetch_one(&f.db)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(row.0.as_deref(), Some("payroll.read"));
+    assert_eq!(row.1.as_deref(), Some("BLOCK"));
 }

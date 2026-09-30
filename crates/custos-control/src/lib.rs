@@ -7,6 +7,7 @@
 //! for why this crate — unlike the rest of the workspace — isn't Apache-2.0.
 
 pub mod agents;
+pub mod audit;
 pub mod config;
 pub mod gateways;
 pub mod policies;
@@ -86,6 +87,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/gateways", get(list_gateways_handler))
         .route("/gateways/bundle", get(gateway_bundle_handler))
         .route("/gateways/heartbeat", post(heartbeat_handler))
+        .route("/gateways/audit/batch", post(ingest_audit_batch_handler))
         .with_state(state)
 }
 
@@ -606,6 +608,27 @@ async fn heartbeat_handler(
     {
         Ok(()) => StatusCode::OK.into_response(),
         Err(e) => gateways_error_response(e),
+    }
+}
+
+fn audit_error_response(e: audit::AuditError) -> axum::response::Response {
+    match e {
+        audit::AuditError::GatewayNotFound => StatusCode::NOT_FOUND.into_response(),
+        audit::AuditError::Db(e) => {
+            tracing::error!(error = %e, "audit ingest db error");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+async fn ingest_audit_batch_handler(
+    State(state): State<Arc<AppState>>,
+    auth: GatewayAuth,
+    Json(records): Json<Vec<serde_json::Value>>,
+) -> impl IntoResponse {
+    match audit::ingest_batch(&state.db, auth.tenant_id, auth.gateway_id, &records).await {
+        Ok(outcome) => (StatusCode::OK, Json(outcome)).into_response(),
+        Err(e) => audit_error_response(e),
     }
 }
 
