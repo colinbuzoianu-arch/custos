@@ -77,6 +77,10 @@ pub struct AppState {
     /// heartbeats.
     pub decisions_allowed: AtomicU64,
     pub decisions_blocked: AtomicU64,
+    /// `Some` only when `[control]` is configured and its enrollment state
+    /// loaded successfully. `None` means every `@hold` fails closed to
+    /// `Block` — there's no way to ask a human anything.
+    pub control_approvals: Option<Arc<control_sync::ApprovalClient>>,
 }
 
 impl AppState {
@@ -95,6 +99,11 @@ impl AppState {
             .map(|a| (AgentId(a.id.clone()), a.owner.clone()))
             .collect();
         let verifying_keys = cfg.verifying_keys()?;
+        let control_approvals = cfg
+            .control
+            .as_ref()
+            .and_then(control_sync::ApprovalClient::build)
+            .map(Arc::new);
         Ok(Self {
             policy,
             audit: Mutex::new(audit),
@@ -110,6 +119,7 @@ impl AppState {
             client: reqwest::Client::new(),
             decisions_allowed: AtomicU64::new(0),
             decisions_blocked: AtomicU64::new(0),
+            control_approvals,
         })
     }
 }
@@ -431,6 +441,39 @@ fn bind_session(state: &AppState, agent: &AgentId, session_id: &str) {
     );
 }
 
+/// Writes one decision to the audit log before anything acts on it,
+/// waiting right here for the write (and its fsync) to finish on a
+/// blocking thread so it never stalls the async reactor. `false` means the
+/// write failed — the caller must block, never forward, on that alone.
+async fn audit_decision(
+    state: &Arc<AppState>,
+    call: &ToolCall,
+    decision: &Decision,
+    findings: &custos_inspect::Findings,
+    policy_version: &str,
+) -> bool {
+    let write_state = Arc::clone(state);
+    let write_call = call.clone();
+    let write_decision = decision.clone();
+    let write_findings = findings.clone();
+    let owner = state.owners.get(&call.agent).cloned().flatten();
+    let policy_version = policy_version.to_string();
+    tokio::task::spawn_blocking(move || match write_state.audit.lock() {
+        Ok(mut log) => log
+            .append(
+                &write_call,
+                &write_decision,
+                owner.as_deref(),
+                &policy_version,
+                &write_findings,
+            )
+            .is_ok(),
+        Err(_) => false,
+    })
+    .await
+    .unwrap_or(false)
+}
+
 /// Returns `Some(response)` if the call must not be forwarded.
 async fn check_tool_call(state: &Arc<AppState>, agent: &AgentId, msg: &Value) -> Option<Response> {
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
@@ -460,44 +503,52 @@ async fn check_tool_call(state: &Arc<AppState>, agent: &AgentId, msg: &Value) ->
     // started, even if a reload replaces it before the write below finishes.
     let policy = state.policy.snapshot();
     let decision = policy.engine.decide(&call, &findings);
-
-    // Record before acting. The write (and its fsync) run on a blocking
-    // thread so they never stall the async reactor, but this still waits
-    // right here for it to finish: if the audit write fails, nothing goes
-    // through.
-    let write_state = Arc::clone(state);
-    let write_call = call.clone();
-    let write_decision = decision.clone();
-    let write_findings = findings.clone();
-    let owner = state.owners.get(agent).cloned().flatten();
     let policy_version = policy.version.clone();
-    let audited = tokio::task::spawn_blocking(move || match write_state.audit.lock() {
-        Ok(mut log) => log
-            .append(
-                &write_call,
-                &write_decision,
-                owner.as_deref(),
-                &policy_version,
-                &write_findings,
-            )
-            .is_ok(),
-        Err(_) => false,
-    })
-    .await
-    .unwrap_or(false);
-    if !audited {
+
+    if !audit_decision(state, &call, &decision, &findings, &policy_version).await {
         tracing::error!(agent = %agent, tool, "audit write failed; blocking");
         return Some((StatusCode::SERVICE_UNAVAILABLE, "audit log unavailable").into_response());
     }
 
-    match &decision {
+    // A hold isn't a final answer: ask Control, wait (bounded by
+    // `approval_timeout_secs`), and treat whatever comes back — approved,
+    // rejected, timed out, or Control unreachable — as a second decision
+    // on the same call, audited the same way before it's acted on.
+    let final_decision = match decision {
+        Decision::Hold { reason, four_eyes } => {
+            let resolved = match &state.control_approvals {
+                Some(approval) => {
+                    control_sync::resolve_hold(
+                        approval, &agent.0, tool, &findings, reason, four_eyes,
+                    )
+                    .await
+                }
+                None => {
+                    tracing::warn!(agent = %agent, tool, "hold policy fired but no Control configured; blocking");
+                    Decision::Block {
+                        reason: format!("hold requires Control, which isn't configured: {reason}"),
+                    }
+                }
+            };
+            if !audit_decision(state, &call, &resolved, &findings, &policy_version).await {
+                tracing::error!(agent = %agent, tool, "audit write failed after hold resolution; blocking");
+                return Some(
+                    (StatusCode::SERVICE_UNAVAILABLE, "audit log unavailable").into_response(),
+                );
+            }
+            resolved
+        }
+        other => other,
+    };
+
+    match &final_decision {
         Decision::Allow => state.decisions_allowed.fetch_add(1, Ordering::Relaxed),
         Decision::Block { .. } | Decision::Hold { .. } => {
             state.decisions_blocked.fetch_add(1, Ordering::Relaxed)
         }
     };
-    tracing::info!(agent = %agent, tool, decision = ?decision, "tool call");
-    match decision {
+    tracing::info!(agent = %agent, tool, decision = ?final_decision, "tool call");
+    match final_decision {
         Decision::Allow => None,
         Decision::Block { reason } | Decision::Hold { reason, .. } => Some(rpc_error(
             id,

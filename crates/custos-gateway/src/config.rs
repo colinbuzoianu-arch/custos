@@ -101,6 +101,22 @@ pub struct ControlConfig {
     /// Default 30s.
     #[serde(default = "default_poll_interval_secs")]
     pub poll_interval_secs: u64,
+    /// How long a `@hold`-ed call waits for a human approval before it's
+    /// blocked. Default 120s, matching the plan's default.
+    #[serde(default = "default_approval_timeout_secs")]
+    pub approval_timeout_secs: u64,
+    /// How often to poll Control for that approval's status while waiting.
+    /// Default 2s.
+    #[serde(default = "default_approval_poll_interval_secs")]
+    pub approval_poll_interval_secs: u64,
+}
+
+fn default_approval_timeout_secs() -> u64 {
+    120
+}
+
+fn default_approval_poll_interval_secs() -> u64 {
+    2
 }
 
 fn default_poll_interval_secs() -> u64 {

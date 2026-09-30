@@ -132,6 +132,172 @@ pub async fn enroll(
     .save(state_path)
 }
 
+/// Everything a held call needs to ask Control for a human decision —
+/// loaded once at startup, independent of the background sync loop's own
+/// bookkeeping (bundle ETag, shipping checkpoint), neither of which this
+/// needs. `credential` is immutable after enrollment, so there's no risk
+/// of this copy and the sync loop's ever disagreeing.
+pub struct ApprovalClient {
+    pub url: String,
+    pub credential: String,
+    pub timeout: Duration,
+    pub poll_interval: Duration,
+    pub client: reqwest::Client,
+}
+
+impl ApprovalClient {
+    /// `None` (logged) on any failure to load — a gateway that can't reach
+    /// Control has no way to ask a human anything, so every `@hold` just
+    /// fails closed once this is `None`.
+    pub fn build(control: &ControlConfig) -> Option<Self> {
+        let control_state = match ControlState::load(&control.state_path) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(error = %e, "could not load control state; @hold policies will fail closed - run `custos enroll` first");
+                return None;
+            }
+        };
+        Some(Self {
+            url: control.url.clone(),
+            credential: control_state.credential,
+            timeout: Duration::from_secs(control.approval_timeout_secs),
+            poll_interval: Duration::from_secs(control.approval_poll_interval_secs),
+            client: reqwest::Client::new(),
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct CreateApprovalRequest<'a> {
+    agent: &'a str,
+    tool: &'a str,
+    findings: &'a serde_json::Value,
+    reason: &'a str,
+    four_eyes: bool,
+}
+
+#[derive(Deserialize)]
+struct CreateApprovalResponse {
+    id: Uuid,
+}
+
+#[derive(Deserialize)]
+struct ApprovalStatus {
+    status: String,
+    comment: Option<String>,
+}
+
+/// Asks Control to resolve a held call: creates the approval, then polls
+/// its status until it's `approved`/`rejected` or `approval.timeout`
+/// elapses. Any failure talking to Control — can't create the approval,
+/// can't reach it while polling, a non-2xx response — blocks immediately
+/// rather than retrying blindly against a service that might be down for
+/// the whole timeout window; only a genuine "still pending" response
+/// keeps the loop going.
+pub async fn resolve_hold(
+    approval: &ApprovalClient,
+    agent: &str,
+    tool: &str,
+    findings: &custos_inspect::Findings,
+    reason: String,
+    four_eyes: bool,
+) -> custos_core::Decision {
+    use custos_core::Decision;
+
+    let findings_json = serde_json::to_value(findings).unwrap_or(serde_json::Value::Null);
+    let created = approval
+        .client
+        .post(format!("{}/api/gateways/approvals", approval.url))
+        .bearer_auth(&approval.credential)
+        .json(&CreateApprovalRequest {
+            agent,
+            tool,
+            findings: &findings_json,
+            reason: &reason,
+            four_eyes,
+        })
+        .send()
+        .await;
+    let approval_id = match created {
+        Ok(r) if r.status().is_success() => match r.json::<CreateApprovalResponse>().await {
+            Ok(body) => body.id,
+            Err(e) => {
+                tracing::error!(error = %e, agent, tool, "could not parse approval creation response; blocking");
+                return Decision::Block {
+                    reason: format!("could not create approval request: {reason}"),
+                };
+            }
+        },
+        Ok(r) => {
+            tracing::error!(status = %r.status(), agent, tool, "Control rejected approval creation; blocking");
+            return Decision::Block {
+                reason: format!("could not create approval request: {reason}"),
+            };
+        }
+        Err(e) => {
+            tracing::error!(error = %e, agent, tool, "could not reach Control to create approval; blocking");
+            return Decision::Block {
+                reason: format!("Control unreachable; holds fail closed: {reason}"),
+            };
+        }
+    };
+
+    let deadline = tokio::time::Instant::now() + approval.timeout;
+    let mut tick = tokio::time::interval(approval.poll_interval);
+    loop {
+        tick.tick().await;
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!(agent, tool, %approval_id, "approval timed out; blocking");
+            return Decision::Block {
+                reason: "approval timed out".into(),
+            };
+        }
+        let polled = approval
+            .client
+            .get(format!(
+                "{}/api/gateways/approvals/{approval_id}",
+                approval.url
+            ))
+            .bearer_auth(&approval.credential)
+            .send()
+            .await;
+        let body: ApprovalStatus = match polled {
+            Ok(r) if r.status().is_success() => match r.json().await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::error!(error = %e, agent, tool, %approval_id, "could not parse approval status; blocking");
+                    return Decision::Block {
+                        reason: "could not read approval status".into(),
+                    };
+                }
+            },
+            Ok(r) => {
+                tracing::error!(status = %r.status(), agent, tool, %approval_id, "Control rejected approval status check; blocking");
+                return Decision::Block {
+                    reason: "could not read approval status".into(),
+                };
+            }
+            Err(e) => {
+                tracing::error!(error = %e, agent, tool, %approval_id, "could not reach Control while polling approval; blocking");
+                return Decision::Block {
+                    reason: "Control unreachable; holds fail closed".into(),
+                };
+            }
+        };
+        match body.status.as_str() {
+            "approved" => return Decision::Allow,
+            "rejected" => {
+                return Decision::Block {
+                    reason: body
+                        .comment
+                        .unwrap_or_else(|| "rejected by approver".to_string()),
+                };
+            }
+            _ => continue,
+        }
+    }
+}
+
 /// Starts the background poll+heartbeat loop. Returns immediately;
 /// `state_path` is read once, up front — if it can't be read or its
 /// pinned public key doesn't decode, sync is skipped entirely (logged as
@@ -476,6 +642,8 @@ mod tests {
             url,
             state_path: "unused".into(),
             poll_interval_secs: 30,
+            approval_timeout_secs: 5,
+            approval_poll_interval_secs: 1,
         }
     }
 
@@ -721,5 +889,140 @@ mod tests {
 
         assert_eq!(received.load(std::sync::atomic::Ordering::Relaxed), 1);
         assert_eq!(control_state.last_shipped_seq, Some(2));
+    }
+
+    /// A fake Control that always answers a poll with a fixed
+    /// status/comment, for the one-shot resolve_hold scenarios (approved,
+    /// rejected) where the answer never changes across polls.
+    async fn fake_approvals_server(status: &'static str, comment: Option<&'static str>) -> String {
+        let router = Router::new()
+            .route(
+                "/api/gateways/approvals",
+                axum::routing::post(|| async {
+                    (
+                        axum::http::StatusCode::CREATED,
+                        axum::Json(serde_json::json!({ "id": Uuid::new_v4() })),
+                    )
+                }),
+            )
+            .route(
+                "/api/gateways/approvals/{id}",
+                axum::routing::get(move || async move {
+                    axum::Json(serde_json::json!({ "status": status, "comment": comment }))
+                }),
+            );
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(e) => panic!("{e}"),
+        };
+        let addr = match listener.local_addr() {
+            Ok(a) => a,
+            Err(e) => panic!("{e}"),
+        };
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        format!("http://{addr}")
+    }
+
+    fn sample_approval_client(url: String, timeout_secs: u64) -> ApprovalClient {
+        ApprovalClient {
+            url,
+            credential: "test-credential".into(),
+            timeout: Duration::from_secs(timeout_secs),
+            poll_interval: Duration::from_millis(100),
+            client: reqwest::Client::new(),
+        }
+    }
+
+    fn no_findings() -> custos_inspect::Findings {
+        custos_inspect::Findings::default()
+    }
+
+    #[tokio::test]
+    async fn resolve_hold_returns_allow_when_approved() {
+        let url = fake_approvals_server("approved", None).await;
+        let approval = sample_approval_client(url, 5);
+        let decision = resolve_hold(
+            &approval,
+            "invoice-processor",
+            "payroll.run",
+            &no_findings(),
+            "needs a human".into(),
+            false,
+        )
+        .await;
+        assert_eq!(decision, custos_core::Decision::Allow);
+    }
+
+    #[tokio::test]
+    async fn resolve_hold_returns_block_with_comment_when_rejected() {
+        let url = fake_approvals_server("rejected", Some("too risky")).await;
+        let approval = sample_approval_client(url, 5);
+        let decision = resolve_hold(
+            &approval,
+            "invoice-processor",
+            "payroll.run",
+            &no_findings(),
+            "needs a human".into(),
+            false,
+        )
+        .await;
+        match decision {
+            custos_core::Decision::Block { reason } => assert_eq!(reason, "too risky"),
+            other => panic!("expected Block, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_hold_blocks_after_timing_out_while_still_pending() {
+        let url = fake_approvals_server("pending", None).await;
+        let approval = sample_approval_client(url, 1);
+        let decision = resolve_hold(
+            &approval,
+            "invoice-processor",
+            "payroll.run",
+            &no_findings(),
+            "needs a human".into(),
+            false,
+        )
+        .await;
+        match decision {
+            custos_core::Decision::Block { reason } => assert_eq!(reason, "approval timed out"),
+            other => panic!("expected Block, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_hold_blocks_immediately_when_control_is_unreachable() {
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(e) => panic!("{e}"),
+        };
+        let addr = match listener.local_addr() {
+            Ok(a) => a,
+            Err(e) => panic!("{e}"),
+        };
+        drop(listener);
+
+        // A long timeout that a working implementation would never wait
+        // out - proves this returns promptly on unreachability rather than
+        // retrying until the deadline.
+        let approval = sample_approval_client(format!("http://{addr}"), 3600);
+        let started = tokio::time::Instant::now();
+        let decision = resolve_hold(
+            &approval,
+            "invoice-processor",
+            "payroll.run",
+            &no_findings(),
+            "needs a human".into(),
+            false,
+        )
+        .await;
+        assert!(started.elapsed() < Duration::from_secs(5));
+        match decision {
+            custos_core::Decision::Block { .. } => {}
+            other => panic!("expected Block, got {other:?}"),
+        }
     }
 }

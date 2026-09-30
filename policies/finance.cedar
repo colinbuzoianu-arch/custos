@@ -25,3 +25,17 @@ forbid (
     action,
     resource == Tool::"payroll.read_salaries"
 );
+
+// `@hold` turns what would otherwise be an Allow into a wait-for-a-human
+// decision (session 16) - the gateway asks Custos Control and blocks if
+// nobody approves it within `approval_timeout_secs`. `@four_eyes` (no
+// value needed) additionally stops the agent's own owner from being the
+// one who approves it.
+@id("large-vendor-payment-needs-approval")
+@hold("vendor payment proposal requires a human approver")
+@four_eyes
+permit (
+    principal == Agent::"invoice-processor",
+    action == Action::"call_tool",
+    resource == Tool::"sap.approve_vendor_payment"
+);

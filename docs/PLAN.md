@@ -173,14 +173,17 @@ Each session = one branch/commit, `/check` green, `/security-review` before comm
       Same standing caveat as sessions 14: not verified in an actual browser.
 
 ### Session 16 — hold and human approval
-- [ ] Cedar annotation `@hold("reason")` on a permit: matching calls become `Hold`.
-- [ ] Gateway creates an approval request in Control and waits (long-poll) up to a timeout
-      (config, default 120 s). Approved → forward. Rejected or timeout → block. Control
-      unreachable → block. Every step audited.
+- [x] Cedar annotation `@hold("reason")` on a permit: matching calls become `Hold`.
+- [x] Gateway creates an approval request in Control and waits up to a timeout (config,
+      default 120s). Approved → forward. Rejected or timeout → block. Control unreachable →
+      block. Every step audited. (Gateway polls Control every `approval_poll_interval_secs`
+      rather than a true server-side long-poll — see docs/decisions/0008-hold-and-approval.md.)
 - [ ] Approvals page: pending queue, agent/tool/findings (never raw arguments unless audit
-      mode allows), approve/reject with comment, only `approver`/`admin` roles.
-- [ ] The approver can't be the agent's owner if `four_eyes = true` in the policy.
-- Tests: approve, reject, timeout, Control down, wrong role.
+      mode allows), approve/reject with comment, only `approver`/`admin` roles. API done
+      (GET /api/approvals, POST /api/approvals/{id}/approve|reject); dashboard page is the
+      remaining follow-up.
+- [x] The approver can't be the agent's owner if the policy carries `@four_eyes`.
+- Tests: approve ✓, reject ✓, timeout ✓, Control down ✓, wrong role ✓.
 
 ### Session 17 — evidence export
 - [ ] Evidence pack for a time range: PDF report (EN/DE/RO) with agent inventory, active policies

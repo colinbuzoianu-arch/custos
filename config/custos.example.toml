@@ -75,3 +75,11 @@ token_sha256 = "REPLACE_WITH_HASH"
 # url = "https://control.example.com"
 # state_path = "data/control-state.json"
 # poll_interval_secs = 30
+#
+# How long a call held by a Cedar `@hold` policy waits for a human
+# approval before it's blocked, and how often to poll Control for that
+# approval's status while waiting. Defaults shown. With no [control]
+# section at all, every @hold fails closed immediately - there's no way
+# to ask a human anything.
+# approval_timeout_secs = 120
+# approval_poll_interval_secs = 2
