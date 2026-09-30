@@ -10,6 +10,7 @@ pub mod agents;
 pub mod approvals;
 pub mod audit;
 pub mod config;
+pub mod evidence;
 pub mod gateways;
 pub mod overview;
 pub mod policies;
@@ -115,6 +116,8 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/audit", get(search_audit_handler))
         .route("/audit/stream", get(audit_stream_handler))
         .route("/overview", get(overview_handler))
+        .route("/evidence.json", get(evidence_json_handler))
+        .route("/evidence.pdf", get(evidence_pdf_handler))
 }
 
 pub fn app(state: Arc<AppState>) -> Router {
@@ -942,6 +945,117 @@ async fn overview_handler(
         }
         Err(overview::OverviewError::Gateways(e)) => gateways_error_response(e),
     }
+}
+
+#[derive(Deserialize)]
+struct EvidenceQuery {
+    from: String,
+    to: String,
+    #[serde(default)]
+    lang: Option<String>,
+}
+
+fn parse_required_timestamp(s: &str) -> Result<time::OffsetDateTime, StatusCode> {
+    time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
+        .map_err(|_| StatusCode::BAD_REQUEST)
+}
+
+fn evidence_error_response(e: evidence::EvidenceError) -> axum::response::Response {
+    match e {
+        evidence::EvidenceError::UnsupportedLanguage(_) => StatusCode::BAD_REQUEST.into_response(),
+        evidence::EvidenceError::Agents(e) => agents_error_response(e),
+        evidence::EvidenceError::Policies(e) => policies_error_response(e),
+        evidence::EvidenceError::Gateways(e) => gateways_error_response(e),
+        evidence::EvidenceError::Db(e) => {
+            tracing::error!(error = %e, "evidence db error");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        evidence::EvidenceError::Json(e) => {
+            tracing::error!(error = %e, "evidence serialize error");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        evidence::EvidenceError::Pdf(e) => {
+            tracing::error!(error = %e, "evidence pdf render error");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+async fn evidence_json_handler(
+    State(state): State<Arc<AppState>>,
+    AdminUser(user): AdminUser,
+    Query(q): Query<EvidenceQuery>,
+) -> impl IntoResponse {
+    let from = match parse_required_timestamp(&q.from) {
+        Ok(v) => v,
+        Err(status) => return status.into_response(),
+    };
+    let to = match parse_required_timestamp(&q.to) {
+        Ok(v) => v,
+        Err(status) => return status.into_response(),
+    };
+    let report = match evidence::gather(&state.db, user.tenant_id, from, to).await {
+        Ok(r) => r,
+        Err(e) => return evidence_error_response(e),
+    };
+    let signed = match evidence::sign(&report, &state.policy_signing_key) {
+        Ok(s) => s,
+        Err(e) => return evidence_error_response(e),
+    };
+    agents::record_admin_audit(
+        &state.db,
+        user.tenant_id,
+        user.user_id,
+        "export_evidence",
+        "evidence",
+        None,
+        Some(serde_json::json!({ "format": "json", "from": q.from, "to": q.to })),
+    )
+    .await;
+    Json(signed).into_response()
+}
+
+async fn evidence_pdf_handler(
+    State(state): State<Arc<AppState>>,
+    AdminUser(user): AdminUser,
+    Query(q): Query<EvidenceQuery>,
+) -> impl IntoResponse {
+    let from = match parse_required_timestamp(&q.from) {
+        Ok(v) => v,
+        Err(status) => return status.into_response(),
+    };
+    let to = match parse_required_timestamp(&q.to) {
+        Ok(v) => v,
+        Err(status) => return status.into_response(),
+    };
+    let lang: evidence::Lang = match q.lang.as_deref().unwrap_or("en").parse() {
+        Ok(l) => l,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let report = match evidence::gather(&state.db, user.tenant_id, from, to).await {
+        Ok(r) => r,
+        Err(e) => return evidence_error_response(e),
+    };
+    let pdf_bytes = match evidence::render_pdf(&report, lang) {
+        Ok(b) => b,
+        Err(e) => return evidence_error_response(e),
+    };
+    agents::record_admin_audit(
+        &state.db,
+        user.tenant_id,
+        user.user_id,
+        "export_evidence",
+        "evidence",
+        None,
+        Some(serde_json::json!({ "format": "pdf", "from": q.from, "to": q.to })),
+    )
+    .await;
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/pdf")],
+        pdf_bytes,
+    )
+        .into_response()
 }
 
 #[cfg(test)]

@@ -186,11 +186,15 @@ Each session = one branch/commit, `/check` green, `/security-review` before comm
 - Tests: approve ✓, reject ✓, timeout ✓, Control down ✓, wrong role ✓.
 
 ### Session 17 — evidence export
-- [ ] Evidence pack for a time range: PDF report (EN/DE/RO) with agent inventory, active policies
-      and versions, decision statistics, approvals with approver names, chain-integrity result;
-      plus a signed JSON bundle of the underlying records.
-- [ ] Map sections to EU AI Act (human oversight, record-keeping), NIS2 (access control) and
-      GDPR (data minimisation) with a disclaimer that this is evidence, not a compliance verdict.
+- [x] Evidence pack for a time range: PDF report (EN/DE/RO) with agent inventory, published
+      policy versions, decision statistics, resolved approvals with approver emails,
+      per-gateway chain-integrity status; plus a signed JSON bundle of the same underlying
+      records (GET /api/evidence.pdf, GET /api/evidence.json, both admin-only).
+- [x] Compliance mapping drafted (EU AI Act Art. 12/14, NIS2 Art. 21(2)(a)/(e),
+      GDPR Art. 5(1)(c)/(f)) with an explicit "not a compliance certification" disclaimer —
+      **not legally reviewed**, flagged in docs/decisions/0009-evidence-export.md for Colin to
+      check before any customer-facing use.
+- No dashboard page yet for triggering an export — API only, see the ADR.
 
 ### Session 18 — release
 - [ ] End-to-end demo in docker compose: MCP server + gateway + Control + Postgres + seeded

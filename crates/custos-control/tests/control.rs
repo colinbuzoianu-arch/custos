@@ -10,6 +10,7 @@ use axum::http::{Request, StatusCode};
 use custos_control::agents::{self, AgentPatch, AgentsError, Status};
 use custos_control::approvals::{self, ApprovalsError, NewApproval};
 use custos_control::audit;
+use custos_control::evidence;
 use custos_control::gateways::{self, GatewaysError};
 use custos_control::policies::{self, PoliciesError};
 use custos_control::sessions::{self, RateLimiter, SESSION_COOKIE};
@@ -1348,4 +1349,162 @@ async fn a_viewer_cannot_list_pending_approvals() {
         Err(e) => panic!("{e}"),
     };
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[ignore]
+async fn evidence_json_endpoint_returns_a_verifiable_signed_bundle() {
+    let f = fixture(Role::Admin).await;
+    let limiter = RateLimiter::default();
+    let logged_in =
+        match sessions::login(&f.db, &limiter, &f.tenant_slug, &f.email, f.password).await {
+            Ok(l) => l,
+            Err(e) => panic!("{e}"),
+        };
+    let signing_key = SigningKey::from_bytes(&[8u8; 32]);
+    let db = f.db.clone();
+    let state = Arc::new(AppState {
+        db,
+        login_attempts: RateLimiter::default(),
+        policy_signing_key: signing_key.clone(),
+        audit_events: tokio::sync::broadcast::channel(custos_control::AUDIT_EVENTS_CAPACITY).0,
+    });
+
+    let request = match Request::builder()
+        .uri("/api/evidence.json?from=2020-01-01T00:00:00Z&to=2030-01-01T00:00:00Z")
+        .header(
+            "cookie",
+            format!("{SESSION_COOKIE}={}", logged_in.session_id),
+        )
+        .body(Body::empty())
+    {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    let response = match app(state).oneshot(request).await {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let bytes = match axum::body::to_bytes(response.into_body(), usize::MAX).await {
+        Ok(b) => b,
+        Err(e) => panic!("{e}"),
+    };
+    let signed: evidence::SignedEvidence = match serde_json::from_slice(&bytes) {
+        Ok(s) => s,
+        Err(e) => panic!("{e}"),
+    };
+    let sig_bytes: [u8; 64] = match base64::Engine::decode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        &signed.signature,
+    )
+    .ok()
+    .and_then(|b| b.try_into().ok())
+    {
+        Some(b) => b,
+        None => panic!("signature must decode to 64 bytes"),
+    };
+    let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+    assert!(
+        signing_key
+            .verifying_key()
+            .verify_strict(signed.evidence_json.as_bytes(), &signature)
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn evidence_pdf_endpoint_returns_pdf_bytes() {
+    let f = fixture(Role::Admin).await;
+    let limiter = RateLimiter::default();
+    let logged_in =
+        match sessions::login(&f.db, &limiter, &f.tenant_slug, &f.email, f.password).await {
+            Ok(l) => l,
+            Err(e) => panic!("{e}"),
+        };
+    let state = test_state(f.db);
+
+    let request = match Request::builder()
+        .uri("/api/evidence.pdf?from=2020-01-01T00:00:00Z&to=2030-01-01T00:00:00Z&lang=ro")
+        .header(
+            "cookie",
+            format!("{SESSION_COOKIE}={}", logged_in.session_id),
+        )
+        .body(Body::empty())
+    {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    let response = match app(state).oneshot(request).await {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = match axum::body::to_bytes(response.into_body(), usize::MAX).await {
+        Ok(b) => b,
+        Err(e) => panic!("{e}"),
+    };
+    assert!(bytes.starts_with(b"%PDF"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn evidence_endpoints_reject_non_admins() {
+    let f = fixture(Role::Viewer).await;
+    let limiter = RateLimiter::default();
+    let logged_in =
+        match sessions::login(&f.db, &limiter, &f.tenant_slug, &f.email, f.password).await {
+            Ok(l) => l,
+            Err(e) => panic!("{e}"),
+        };
+    let state = test_state(f.db);
+
+    let request = match Request::builder()
+        .uri("/api/evidence.json?from=2020-01-01T00:00:00Z&to=2030-01-01T00:00:00Z")
+        .header(
+            "cookie",
+            format!("{SESSION_COOKIE}={}", logged_in.session_id),
+        )
+        .body(Body::empty())
+    {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    let response = match app(state).oneshot(request).await {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[ignore]
+async fn evidence_endpoint_rejects_a_malformed_date() {
+    let f = fixture(Role::Admin).await;
+    let limiter = RateLimiter::default();
+    let logged_in =
+        match sessions::login(&f.db, &limiter, &f.tenant_slug, &f.email, f.password).await {
+            Ok(l) => l,
+            Err(e) => panic!("{e}"),
+        };
+    let state = test_state(f.db);
+
+    let request = match Request::builder()
+        .uri("/api/evidence.json?from=not-a-date&to=2030-01-01T00:00:00Z")
+        .header(
+            "cookie",
+            format!("{SESSION_COOKIE}={}", logged_in.session_id),
+        )
+        .body(Body::empty())
+    {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    let response = match app(state).oneshot(request).await {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
