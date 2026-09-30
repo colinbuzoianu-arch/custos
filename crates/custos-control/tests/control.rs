@@ -7,6 +7,7 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use custos_control::agents::{self, AgentPatch, AgentsError, Status};
 use custos_control::sessions::{self, RateLimiter, SESSION_COOKIE};
 use custos_control::users::{self, Role};
 use custos_control::{AppState, app};
@@ -34,6 +35,7 @@ async fn pool() -> PgPool {
 /// other or with real data in the same database.
 struct Fixture {
     db: PgPool,
+    tenant_id: Uuid,
     tenant_slug: String,
     email: String,
     password: &'static str,
@@ -59,6 +61,7 @@ async fn fixture(role: Role) -> Fixture {
 
     Fixture {
         db,
+        tenant_id,
         tenant_slug,
         email,
         password,
@@ -131,6 +134,165 @@ async fn viewer_cannot_call_admin_endpoint() {
         Err(e) => panic!("{e}"),
     };
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[ignore]
+async fn agent_crud_round_trips() {
+    let f = fixture(Role::Admin).await;
+
+    let created = match agents::create_agent(
+        &f.db,
+        f.tenant_id,
+        "agent-one",
+        None,
+        Some("does things"),
+        None,
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(created.status, "active");
+
+    let fetched = match agents::get_agent(&f.db, f.tenant_id, created.id).await {
+        Ok(a) => a,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(fetched.name, "agent-one");
+
+    let updated = match agents::update_agent(
+        &f.db,
+        f.tenant_id,
+        created.id,
+        AgentPatch {
+            status: Some(Status::Disabled),
+            ..Default::default()
+        },
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(updated.status, "disabled");
+    // A field not mentioned in the patch must survive untouched.
+    assert_eq!(updated.description.as_deref(), Some("does things"));
+
+    if let Err(e) = agents::delete_agent(&f.db, f.tenant_id, created.id).await {
+        panic!("{e}");
+    }
+    let after_delete = agents::get_agent(&f.db, f.tenant_id, created.id).await;
+    assert!(matches!(after_delete, Err(AgentsError::NotFound)));
+}
+
+#[tokio::test]
+#[ignore]
+async fn agent_name_must_be_unique_within_a_tenant() {
+    let f = fixture(Role::Admin).await;
+    let tenant_id = f.tenant_id;
+    if let Err(e) = agents::create_agent(&f.db, tenant_id, "dup", None, None, None).await {
+        panic!("{e}");
+    }
+    let second = agents::create_agent(&f.db, tenant_id, "dup", None, None, None).await;
+    assert!(matches!(second, Err(AgentsError::NameTaken(_))));
+}
+
+#[tokio::test]
+#[ignore]
+async fn agent_from_another_tenant_is_not_found() {
+    let f = fixture(Role::Admin).await;
+    let tenant_id = f.tenant_id;
+    let created = match agents::create_agent(&f.db, tenant_id, "isolated", None, None, None).await {
+        Ok(a) => a,
+        Err(e) => panic!("{e}"),
+    };
+
+    let other_tenant = match users::create_tenant(&f.db, "other-tenant", "other-tenant").await {
+        Ok(id) => id,
+        Err(e) => panic!("{e}"),
+    };
+    let result = agents::get_agent(&f.db, other_tenant, created.id).await;
+    assert!(matches!(result, Err(AgentsError::NotFound)));
+}
+
+#[tokio::test]
+#[ignore]
+async fn issued_token_hashes_to_the_stored_value_and_is_never_returned_again() {
+    let f = fixture(Role::Admin).await;
+    let tenant_id = f.tenant_id;
+    let created =
+        match agents::create_agent(&f.db, tenant_id, "token-agent", None, None, None).await {
+            Ok(a) => a,
+            Err(e) => panic!("{e}"),
+        };
+
+    let token = match agents::issue_token(&f.db, tenant_id, created.id).await {
+        Ok(t) => t,
+        Err(e) => panic!("{e}"),
+    };
+    let stored_hash: (Option<String>,) =
+        match sqlx::query_as("select token_sha256 from agents where id = $1")
+            .bind(created.id)
+            .fetch_one(&f.db)
+            .await
+        {
+            Ok(row) => row,
+            Err(e) => panic!("{e}"),
+        };
+    assert_eq!(stored_hash.0, Some(agents::hash_token(&token)));
+
+    // The `Agent` type returned by every other read has no field for the
+    // token or its hash - serializing it can't leak either one.
+    let refetched = match agents::get_agent(&f.db, tenant_id, created.id).await {
+        Ok(a) => a,
+        Err(e) => panic!("{e}"),
+    };
+    let json = match serde_json::to_value(&refetched) {
+        Ok(v) => v,
+        Err(e) => panic!("{e}"),
+    };
+    assert!(json.get("token").is_none());
+    assert!(json.get("token_sha256").is_none());
+}
+
+#[tokio::test]
+#[ignore]
+async fn issuing_a_token_writes_an_admin_audit_entry() {
+    let f = fixture(Role::Admin).await;
+    let tenant_id = f.tenant_id;
+    let created =
+        match agents::create_agent(&f.db, tenant_id, "audited-agent", None, None, None).await {
+            Ok(a) => a,
+            Err(e) => panic!("{e}"),
+        };
+    if let Err(e) = agents::issue_token(&f.db, tenant_id, created.id).await {
+        panic!("{e}");
+    }
+    agents::record_admin_audit(
+        &f.db,
+        tenant_id,
+        Uuid::new_v4(),
+        "issue_token",
+        "agent",
+        Some(created.id),
+        None,
+    )
+    .await;
+
+    let count: (i64,) = match sqlx::query_as(
+        "select count(*) from admin_audit where tenant_id = $1 and target_id = $2 and action = 'issue_token'",
+    )
+    .bind(tenant_id)
+    .bind(created.id)
+    .fetch_one(&f.db)
+    .await
+    {
+        Ok(row) => row,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(count.0, 1);
 }
 
 #[tokio::test]

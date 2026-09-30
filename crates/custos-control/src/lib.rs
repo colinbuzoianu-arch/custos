@@ -6,19 +6,25 @@
 //! for why this exists and how it's meant to be deployed, and `NOTICE.md`
 //! for why this crate — unlike the rest of the workspace — isn't Apache-2.0.
 
+pub mod agents;
 pub mod config;
 pub mod sessions;
 pub mod users;
 
-use axum::extract::State;
+use agents::{AgentPatch, AgentsError, Status};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::{Json, Router, routing::get, routing::post};
+use axum::{
+    Json, Router,
+    routing::{get, post},
+};
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 use sessions::{AdminUser, CurrentUser, LoginError, RateLimiter};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use std::sync::Arc;
+use uuid::Uuid;
 
 pub struct AppState {
     pub db: PgPool,
@@ -45,9 +51,18 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .route("/login", post(login_handler))
         .route("/logout", post(logout_handler))
-        // Throwaway route proving the role gate actually rejects
-        // non-admins - a real admin-only endpoint arrives in session 10.
         .route("/admin/ping", get(|_admin: AdminUser| async { "ok" }))
+        .route(
+            "/agents",
+            post(create_agent_handler).get(list_agents_handler),
+        )
+        .route(
+            "/agents/{id}",
+            get(get_agent_handler)
+                .patch(update_agent_handler)
+                .delete(delete_agent_handler),
+        )
+        .route("/agents/{id}/token", post(issue_token_handler))
         .with_state(state)
 }
 
@@ -109,6 +124,204 @@ async fn logout_handler(
             tracing::error!(error = %e, "logout failed");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateAgentRequest {
+    name: String,
+    owner_user_id: Option<Uuid>,
+    description: Option<String>,
+    expiry_date: Option<String>,
+}
+
+/// Parses an optional RFC3339 timestamp from a request body, `Bad Request`
+/// on anything malformed rather than silently dropping it.
+fn parse_expiry(s: &Option<String>) -> Result<Option<time::OffsetDateTime>, StatusCode> {
+    match s {
+        None => Ok(None),
+        Some(s) => time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
+            .map(Some)
+            .map_err(|_| StatusCode::BAD_REQUEST),
+    }
+}
+
+fn agents_error_response(e: AgentsError) -> axum::response::Response {
+    match e {
+        AgentsError::NotFound => StatusCode::NOT_FOUND.into_response(),
+        AgentsError::NameTaken(_) => StatusCode::CONFLICT.into_response(),
+        AgentsError::Db(e) => {
+            tracing::error!(error = %e, "agents db error");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+async fn create_agent_handler(
+    State(state): State<Arc<AppState>>,
+    AdminUser(user): AdminUser,
+    headers: HeaderMap,
+    Json(req): Json<CreateAgentRequest>,
+) -> impl IntoResponse {
+    if let Err(status) = user.check_csrf(&headers) {
+        return status.into_response();
+    }
+    let expiry_date = match parse_expiry(&req.expiry_date) {
+        Ok(v) => v,
+        Err(status) => return status.into_response(),
+    };
+    match agents::create_agent(
+        &state.db,
+        user.tenant_id,
+        &req.name,
+        req.owner_user_id,
+        req.description.as_deref(),
+        expiry_date,
+    )
+    .await
+    {
+        Ok(agent) => {
+            agents::record_admin_audit(
+                &state.db,
+                user.tenant_id,
+                user.user_id,
+                "create",
+                "agent",
+                Some(agent.id),
+                None,
+            )
+            .await;
+            (StatusCode::CREATED, Json(agent)).into_response()
+        }
+        Err(e) => agents_error_response(e),
+    }
+}
+
+async fn list_agents_handler(
+    State(state): State<Arc<AppState>>,
+    AdminUser(user): AdminUser,
+) -> impl IntoResponse {
+    match agents::list_agents(&state.db, user.tenant_id).await {
+        Ok(list) => Json(list).into_response(),
+        Err(e) => agents_error_response(e),
+    }
+}
+
+async fn get_agent_handler(
+    State(state): State<Arc<AppState>>,
+    AdminUser(user): AdminUser,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    match agents::get_agent(&state.db, user.tenant_id, id).await {
+        Ok(agent) => Json(agent).into_response(),
+        Err(e) => agents_error_response(e),
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct UpdateAgentRequest {
+    name: Option<String>,
+    owner_user_id: Option<Uuid>,
+    description: Option<String>,
+    status: Option<String>,
+    expiry_date: Option<String>,
+}
+
+async fn update_agent_handler(
+    State(state): State<Arc<AppState>>,
+    AdminUser(user): AdminUser,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateAgentRequest>,
+) -> impl IntoResponse {
+    if let Err(status) = user.check_csrf(&headers) {
+        return status.into_response();
+    }
+    let expiry_date = match parse_expiry(&req.expiry_date) {
+        Ok(v) => v,
+        Err(status) => return status.into_response(),
+    };
+    let status_val: Option<Status> = match req.status.as_deref().map(str::parse) {
+        Some(Ok(s)) => Some(s),
+        Some(Err(_)) => return StatusCode::BAD_REQUEST.into_response(),
+        None => None,
+    };
+    let patch = AgentPatch {
+        name: req.name,
+        owner_user_id: req.owner_user_id,
+        description: req.description,
+        status: status_val,
+        expiry_date,
+    };
+    match agents::update_agent(&state.db, user.tenant_id, id, patch).await {
+        Ok(agent) => {
+            agents::record_admin_audit(
+                &state.db,
+                user.tenant_id,
+                user.user_id,
+                "update",
+                "agent",
+                Some(agent.id),
+                None,
+            )
+            .await;
+            Json(agent).into_response()
+        }
+        Err(e) => agents_error_response(e),
+    }
+}
+
+async fn delete_agent_handler(
+    State(state): State<Arc<AppState>>,
+    AdminUser(user): AdminUser,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    if let Err(status) = user.check_csrf(&headers) {
+        return status.into_response();
+    }
+    match agents::delete_agent(&state.db, user.tenant_id, id).await {
+        Ok(()) => {
+            agents::record_admin_audit(
+                &state.db,
+                user.tenant_id,
+                user.user_id,
+                "delete",
+                "agent",
+                Some(id),
+                None,
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => agents_error_response(e),
+    }
+}
+
+async fn issue_token_handler(
+    State(state): State<Arc<AppState>>,
+    AdminUser(user): AdminUser,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    if let Err(status) = user.check_csrf(&headers) {
+        return status.into_response();
+    }
+    match agents::issue_token(&state.db, user.tenant_id, id).await {
+        Ok(token) => {
+            agents::record_admin_audit(
+                &state.db,
+                user.tenant_id,
+                user.user_id,
+                "issue_token",
+                "agent",
+                Some(id),
+                None,
+            )
+            .await;
+            Json(serde_json::json!({ "token": token })).into_response()
+        }
+        Err(e) => agents_error_response(e),
     }
 }
 

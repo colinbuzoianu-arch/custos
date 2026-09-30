@@ -108,10 +108,11 @@ Each session = one branch/commit, `/check` green, `/security-review` before comm
 - Tests: login ok/fail, lockout after N failures, viewer can't call admin endpoints.
 
 ### Session 10 — agents API
-- [ ] CRUD agents (id, name, owner user, description, status active/disabled, expiry date).
-- [ ] Issue/rotate an agent token from Control: shown once, stored only as hash.
-- [ ] Every change written to an admin audit log (who changed what, when).
-- Tests: token shown once only, disabled agent's token rejected after sync (session 12).
+- [x] CRUD agents (id, name, owner user, description, status active/disabled, expiry date).
+- [x] Issue/rotate an agent token from Control: shown once, stored only as hash.
+- [x] Every change written to an admin audit log (who changed what, when).
+- Tests: token shown once only ✓. Disabled agent's token rejected after sync — needs session 12
+  (gateway enrolment/sync), not testable yet.
 
 ### Session 11 — policies API
 - [ ] Policy sets stored with versions (text, author, message, created_at). Validate with Cedar
