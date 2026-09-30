@@ -1,11 +1,16 @@
 import type {
   Agent,
+  AuditSearchFilters,
+  AuditSearchResult,
   CreateAgentInput,
   IssuedToken,
   LoginResponse,
   Me,
   Overview,
+  PolicyVersion,
+  SavePolicyDraftInput,
   UpdateAgentInput,
+  ValidateResult,
 } from './types'
 
 const BASE = '/api'
@@ -60,6 +65,28 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (await response.json()) as T
 }
 
+/** Like `request`, but for the one endpoint (`/policies/diff`) that
+ * returns a plain-text body, not JSON. */
+async function requestText(path: string, init: RequestInit = {}): Promise<string> {
+  const response = await fetch(`${BASE}${path}`, {
+    ...init,
+    credentials: 'same-origin',
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, response.statusText)
+  }
+  return response.text()
+}
+
+function toQueryString(params: Record<string, string | number | undefined>): string {
+  const search = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined) search.set(key, String(value))
+  }
+  const query = search.toString()
+  return query === '' ? '' : `?${query}`
+}
+
 export const api = {
   login(tenant: string, email: string, password: string): Promise<LoginResponse> {
     return request<LoginResponse>('/login', {
@@ -109,5 +136,34 @@ export const api = {
    * even by calling this again (that issues a brand new token). */
   issueToken(id: string): Promise<IssuedToken> {
     return request<IssuedToken>(`/agents/${id}/token`, { method: 'POST' })
+  },
+
+  listPolicyVersions(): Promise<PolicyVersion[]> {
+    return request<PolicyVersion[]>('/policies')
+  },
+
+  savePolicyDraft(input: SavePolicyDraftInput): Promise<PolicyVersion> {
+    return request<PolicyVersion>('/policies', { method: 'POST', body: JSON.stringify(input) })
+  },
+
+  /** Pure syntax/schema check - never creates a version, safe to call on
+   * every keystroke (debounced by the caller). */
+  validatePolicy(policy_text: string, schema_text?: string | null): Promise<ValidateResult> {
+    return request<ValidateResult>('/policies/validate', {
+      method: 'POST',
+      body: JSON.stringify({ policy_text, schema_text }),
+    })
+  },
+
+  publishPolicyVersion(version: number): Promise<void> {
+    return request<void>(`/policies/${version}/publish`, { method: 'POST' })
+  },
+
+  diffPolicyVersions(from: number, to: number): Promise<string> {
+    return requestText(`/policies/diff${toQueryString({ from, to })}`)
+  },
+
+  searchAudit(filters: AuditSearchFilters): Promise<AuditSearchResult> {
+    return request<AuditSearchResult>(`/audit${toQueryString({ ...filters })}`)
   },
 }

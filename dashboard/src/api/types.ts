@@ -79,3 +79,60 @@ export interface Overview {
   top_blocked_tools: CountedName[]
   gateways: Gateway[]
 }
+
+export interface PolicyVersion {
+  id: string
+  version: number
+  policy_text: string
+  schema_text: string | null
+  message: string | null
+  valid: boolean
+  validation_error: string | null
+  published: boolean
+  created_at: string
+}
+
+export interface SavePolicyDraftInput {
+  policy_text: string
+  schema_text?: string | null
+  message?: string | null
+}
+
+export interface ValidateResult {
+  valid: boolean
+  validation_error: string | null
+}
+
+// The exact JSON a gateway wrote, plus Control's best-effort extraction of
+// the searchable fields (crates/custos-control/src/audit.rs).
+export interface AuditRecordSummary {
+  id: string
+  tenant_id: string
+  gateway_id: string
+  seq: number
+  ts: string | null
+  agent: string | null
+  owner: string | null
+  tool: string | null
+  verdict: string | null
+  policy_version: string | null
+  findings: unknown
+  record: unknown
+  ingested_at: string
+}
+
+export interface AuditSearchResult {
+  records: AuditRecordSummary[]
+  next_cursor: string | null
+}
+
+export interface AuditSearchFilters {
+  agent?: string
+  tool?: string
+  verdict?: string
+  policy_version?: string
+  from?: string
+  to?: string
+  cursor?: string
+  limit?: number
+}

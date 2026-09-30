@@ -6,7 +6,7 @@ import { useAuth } from '../auth/useAuth'
 
 export function AppShell() {
   const { t, i18n } = useTranslation()
-  const { logout } = useAuth()
+  const { auth, logout } = useAuth()
 
   return (
     <div>
@@ -26,6 +26,9 @@ export function AppShell() {
         >
           <NavLink to="/overview">{t('nav.overview')}</NavLink>
           <NavLink to="/agents">{t('nav.agents')}</NavLink>
+          <NavLink to="/live">{t('nav.live')}</NavLink>
+          <NavLink to="/audit">{t('nav.audit')}</NavLink>
+          {auth?.role === 'admin' && <NavLink to="/policies">{t('nav.policies')}</NavLink>}
           <label>
             <span className="visually-hidden">Language</span>
             <select

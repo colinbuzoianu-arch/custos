@@ -162,10 +162,15 @@ Each session = one branch/commit, `/check` green, `/security-review` before comm
       an actual browser (no browser available while building this) — needs a real check.
 
 ### Session 15 — dashboard: live decisions, audit, policies
-- [ ] Live decisions page (SSE stream, pause, filter), click-through to the full record.
-- [ ] Audit search page with filters and CSV/JSON export.
-- [ ] Policy editor: CodeMirror with Cedar highlighting, validate as you type (via API),
-      version history with diff, publish button (admin only) with confirmation.
+- [x] Live decisions page (SSE stream, pause, filter), click-through to the full record.
+- [x] Audit search page with filters and CSV/JSON export. (Export walks every page of the
+      current filters through the existing paginated search API, up to a safety cap — there's
+      no bulk-export endpoint; see docs/decisions/0007-dashboard-live-audit-policies.md.)
+- [x] Policy editor: CodeMirror with Cedar highlighting, validate as you type (via a new
+      POST /api/policies/validate — reusing save_draft would insert a version per keystroke),
+      version history with diff, publish button (admin only, gated both client- and
+      server-side) with confirmation.
+      Same standing caveat as sessions 14: not verified in an actual browser.
 
 ### Session 16 — hold and human approval
 - [ ] Cedar annotation `@hold("reason")` on a permit: matching calls become `Hold`.

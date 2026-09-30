@@ -5,6 +5,9 @@
   "nav": {
     "overview": "Overview",
     "agents": "Agents",
+    "live": "Live",
+    "audit": "Audit",
+    "policies": "Policies",
     "logout": "Log out"
   },
   "login": {
@@ -48,6 +51,50 @@
     "tokenShownOnce": "This token is shown once. Copy it now — it can't be retrieved again.",
     "confirmDisable": "Disable this agent? It will no longer be able to authenticate once its gateway syncs.",
     "errorNameTaken": "An agent with this name already exists."
+  },
+  "live": {
+    "heading": "Live decisions",
+    "pause": "Pause",
+    "resume": "Resume",
+    "filterAgent": "Filter by agent",
+    "filterTool": "Filter by tool",
+    "filterVerdict": "Filter by verdict",
+    "noEvents": "No decisions yet — they'll appear here as they happen.",
+    "details": "Details",
+    "connectionLost": "Connection lost — retrying…"
+  },
+  "audit": {
+    "heading": "Audit search",
+    "agent": "Agent",
+    "tool": "Tool",
+    "verdict": "Verdict",
+    "policyVersion": "Policy version",
+    "from": "From",
+    "to": "To",
+    "search": "Search",
+    "loadMore": "Load more",
+    "exportCsv": "Export CSV",
+    "exportJson": "Export JSON",
+    "exporting": "Exporting…",
+    "noResults": "No matching records."
+  },
+  "policies": {
+    "heading": "Policies",
+    "versions": "Versions",
+    "editingVersion": "Editing v{{version}}",
+    "newDraft": "New draft",
+    "valid": "Valid",
+    "invalid": "invalid",
+    "published": "published",
+    "message": "Change message",
+    "saveDraft": "Save draft",
+    "publish": "Publish",
+    "confirmPublish": "Publish v{{version}}? Every enrolled gateway will pick this up on its next sync.",
+    "diff": "Compare versions",
+    "from": "From",
+    "to": "To",
+    "showDiff": "Show diff",
+    "adminOnly": "Only admins can manage policies."
   },
   "common": {
     "loading": "Loading…",

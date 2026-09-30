@@ -5,6 +5,9 @@
   "nav": {
     "overview": "Prezentare generală",
     "agents": "Agenți",
+    "live": "Live",
+    "audit": "Audit",
+    "policies": "Politici",
     "logout": "Deconectare"
   },
   "login": {
@@ -48,6 +51,50 @@
     "tokenShownOnce": "Acest token este afișat o singură dată. Copiați-l acum — nu mai poate fi recuperat.",
     "confirmDisable": "Dezactivați acest agent? Nu se va mai putea autentifica după următoarea sincronizare a gateway-ului.",
     "errorNameTaken": "Există deja un agent cu acest nume."
+  },
+  "live": {
+    "heading": "Decizii live",
+    "pause": "Pauză",
+    "resume": "Reia",
+    "filterAgent": "Filtrează după agent",
+    "filterTool": "Filtrează după instrument",
+    "filterVerdict": "Filtrează după rezultat",
+    "noEvents": "Nicio decizie încă — vor apărea aici pe măsură ce se întâmplă.",
+    "details": "Detalii",
+    "connectionLost": "Conexiune pierdută — se reîncearcă…"
+  },
+  "audit": {
+    "heading": "Căutare audit",
+    "agent": "Agent",
+    "tool": "Instrument",
+    "verdict": "Rezultat",
+    "policyVersion": "Versiune politică",
+    "from": "De la",
+    "to": "Până la",
+    "search": "Caută",
+    "loadMore": "Încarcă mai multe",
+    "exportCsv": "Exportă CSV",
+    "exportJson": "Exportă JSON",
+    "exporting": "Se exportă…",
+    "noResults": "Nicio înregistrare potrivită."
+  },
+  "policies": {
+    "heading": "Politici",
+    "versions": "Versiuni",
+    "editingVersion": "Se editează v{{version}}",
+    "newDraft": "Ciornă nouă",
+    "valid": "Valid",
+    "invalid": "invalid",
+    "published": "publicat",
+    "message": "Mesaj de schimbare",
+    "saveDraft": "Salvează ciorna",
+    "publish": "Publică",
+    "confirmPublish": "Publicați v{{version}}? Fiecare gateway înregistrat va prelua aceasta la următoarea sincronizare.",
+    "diff": "Compară versiuni",
+    "from": "De la",
+    "to": "Până la",
+    "showDiff": "Arată diferența",
+    "adminOnly": "Doar administratorii pot gestiona politicile."
   },
   "common": {
     "loading": "Se încarcă…",
