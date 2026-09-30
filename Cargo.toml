@@ -43,6 +43,7 @@ time = { version = "0.3", features = ["formatting", "serde"] }
 tempfile = "3"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "migrate", "macros", "time", "uuid"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+argon2 = "0.5"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -7,6 +7,7 @@
 //! for why this crate — unlike the rest of the workspace — isn't Apache-2.0.
 
 pub mod config;
+pub mod users;
 
 use axum::{Router, routing::get};
 use sqlx::postgres::{PgPool, PgPoolOptions};
