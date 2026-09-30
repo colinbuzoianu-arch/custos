@@ -45,6 +45,7 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-r
 uuid = { version = "1", features = ["v4", "serde"] }
 argon2 = "0.5"
 axum-extra = { version = "0.10", features = ["cookie"] }
+similar = "2"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

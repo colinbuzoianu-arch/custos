@@ -8,13 +8,25 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use custos_control::agents::{self, AgentPatch, AgentsError, Status};
+use custos_control::policies::{self, PoliciesError};
 use custos_control::sessions::{self, RateLimiter, SESSION_COOKIE};
 use custos_control::users::{self, Role};
 use custos_control::{AppState, app};
+use ed25519_dalek::SigningKey;
 use sqlx::PgPool;
 use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
+
+/// An `AppState` for HTTP-level tests. The signing key is a fixed test seed
+/// - fine here since none of these tests publish a policy bundle.
+fn test_state(db: PgPool) -> Arc<AppState> {
+    Arc::new(AppState {
+        db,
+        login_attempts: RateLimiter::default(),
+        policy_signing_key: SigningKey::from_bytes(&[1u8; 32]),
+    })
+}
 
 async fn pool() -> PgPool {
     let url = match std::env::var("DATABASE_URL") {
@@ -37,6 +49,7 @@ struct Fixture {
     db: PgPool,
     tenant_id: Uuid,
     tenant_slug: String,
+    user_id: Uuid,
     email: String,
     password: &'static str,
 }
@@ -55,14 +68,16 @@ async fn fixture(role: Role) -> Fixture {
         Ok(h) => h,
         Err(e) => panic!("{e}"),
     };
-    if let Err(e) = users::create_user(&db, tenant_id, &email, &hash, role).await {
-        panic!("{e}");
-    }
+    let user_id = match users::create_user(&db, tenant_id, &email, &hash, role).await {
+        Ok(id) => id,
+        Err(e) => panic!("{e}"),
+    };
 
     Fixture {
         db,
         tenant_id,
         tenant_slug,
+        user_id,
         email,
         password,
     }
@@ -114,10 +129,7 @@ async fn viewer_cannot_call_admin_endpoint() {
             Err(e) => panic!("{e}"),
         };
 
-    let state = Arc::new(AppState {
-        db: f.db,
-        login_attempts: RateLimiter::default(),
-    });
+    let state = test_state(f.db);
     let request = match Request::builder()
         .uri("/admin/ping")
         .header(
@@ -306,10 +318,7 @@ async fn admin_can_call_admin_endpoint() {
             Err(e) => panic!("{e}"),
         };
 
-    let state = Arc::new(AppState {
-        db: f.db,
-        login_attempts: RateLimiter::default(),
-    });
+    let state = test_state(f.db);
     let request = match Request::builder()
         .uri("/admin/ping")
         .header(
@@ -339,10 +348,7 @@ async fn logout_without_csrf_token_is_rejected() {
             Err(e) => panic!("{e}"),
         };
 
-    let state = Arc::new(AppState {
-        db: f.db,
-        login_attempts: RateLimiter::default(),
-    });
+    let state = test_state(f.db);
     let request = match Request::builder()
         .method("POST")
         .uri("/logout")
@@ -360,4 +366,121 @@ async fn logout_without_csrf_token_is_rejected() {
         Err(e) => panic!("{e}"),
     };
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[ignore]
+async fn invalid_policy_draft_saves_but_cannot_publish() {
+    let f = fixture(Role::Admin).await;
+
+    let saved = match policies::save_draft(
+        &f.db,
+        f.tenant_id,
+        f.user_id,
+        "this is not cedar at all",
+        None,
+        Some("first attempt"),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => panic!("{e}"),
+    };
+    assert!(!saved.valid);
+    assert!(saved.validation_error.is_some());
+
+    let key = SigningKey::from_bytes(&[3u8; 32]);
+    let result = policies::publish(&f.db, f.tenant_id, saved.version, &key).await;
+    assert!(matches!(result, Err(PoliciesError::Invalid(_))));
+}
+
+#[tokio::test]
+#[ignore]
+async fn valid_policy_publishes_a_bundle_whose_signature_verifies() {
+    let f = fixture(Role::Admin).await;
+    let policy_text = r#"permit (principal, action, resource == Tool::"echo");"#;
+
+    let saved = match policies::save_draft(
+        &f.db,
+        f.tenant_id,
+        f.user_id,
+        policy_text,
+        None,
+        Some("first version"),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => panic!("{e}"),
+    };
+    assert!(saved.valid, "{:?}", saved.validation_error);
+
+    // An agent active at publish time must appear in the bundle.
+    let agent =
+        match agents::create_agent(&f.db, f.tenant_id, "bundled-agent", None, None, None).await {
+            Ok(a) => a,
+            Err(e) => panic!("{e}"),
+        };
+    if let Err(e) = agents::issue_token(&f.db, f.tenant_id, agent.id).await {
+        panic!("{e}");
+    }
+
+    let key = SigningKey::from_bytes(&[5u8; 32]);
+    let (updated, signed) = match policies::publish(&f.db, f.tenant_id, saved.version, &key).await {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    assert!(updated.published);
+
+    let bundle = match policies::verify_bundle(&signed, &key.verifying_key()) {
+        Ok(b) => b,
+        Err(e) => panic!("{e}"),
+    };
+    assert_eq!(bundle.version, saved.version);
+    assert_eq!(bundle.policy, policy_text);
+    assert!(bundle.agents.iter().any(|a| a.id == agent.id));
+
+    // The wrong key must not verify it.
+    let wrong_key = SigningKey::from_bytes(&[6u8; 32]);
+    assert!(policies::verify_bundle(&signed, &wrong_key.verifying_key()).is_err());
+}
+
+#[tokio::test]
+#[ignore]
+async fn diff_shows_the_change_between_two_versions() {
+    let f = fixture(Role::Admin).await;
+
+    let v1 = match policies::save_draft(
+        &f.db,
+        f.tenant_id,
+        f.user_id,
+        r#"permit (principal, action, resource == Tool::"a");"#,
+        None,
+        None,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => panic!("{e}"),
+    };
+    let v2 = match policies::save_draft(
+        &f.db,
+        f.tenant_id,
+        f.user_id,
+        r#"permit (principal, action, resource == Tool::"b");"#,
+        None,
+        None,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => panic!("{e}"),
+    };
+
+    let diff = match policies::diff_versions(&f.db, f.tenant_id, v1.version, v2.version).await {
+        Ok(d) => d,
+        Err(e) => panic!("{e}"),
+    };
+    assert!(diff.contains("-permit (principal, action, resource == Tool::\"a\");"));
+    assert!(diff.contains("+permit (principal, action, resource == Tool::\"b\");"));
 }

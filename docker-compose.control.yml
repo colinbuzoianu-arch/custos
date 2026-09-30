@@ -23,6 +23,10 @@ services:
       - "127.0.0.1:8788:8788"
     volumes:
       - ./config/custos-control.docker.toml:/etc/custos-control/custos-control.toml:ro
+    environment:
+      # Ed25519 signing seed for policy bundles (hex or base64) - set this
+      # in your shell before `docker compose up`, never commit a real one.
+      - CUSTOS_CONTROL_POLICY_SIGNING_KEY=${CUSTOS_CONTROL_POLICY_SIGNING_KEY}
 
 volumes:
   custos-control-db:

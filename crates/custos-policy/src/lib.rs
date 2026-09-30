@@ -36,6 +36,8 @@ pub enum PolicyError {
     Context(String),
     #[error("invalid schema {path}: {detail}")]
     Schema { path: String, detail: String },
+    #[error("invalid schema: {0}")]
+    SchemaParse(String),
     #[error("policy does not match schema: {0}")]
     Validation(String),
 }
@@ -141,19 +143,28 @@ fn load_schema(dir: &Path) -> Result<Option<cedar_policy::Schema>, PolicyError> 
         path: path.display().to_string(),
         source: e,
     })?;
-    let (schema, _warnings) =
-        cedar_policy::Schema::from_cedarschema_str(&text).map_err(|e| PolicyError::Schema {
+    parse_schema_str(&text)
+        .map(Some)
+        .map_err(|e| PolicyError::Schema {
             path: path.display().to_string(),
             detail: e.to_string(),
-        })?;
-    Ok(Some(schema))
+        })
+}
+
+/// Parses Cedar schema source text (the contents of a `.cedarschema` file),
+/// with no file I/O — for callers (like Control) that keep schema text
+/// somewhere other than a file, e.g. a database column.
+pub fn parse_schema_str(src: &str) -> Result<cedar_policy::Schema, PolicyError> {
+    let (schema, _warnings) = cedar_policy::Schema::from_cedarschema_str(src)
+        .map_err(|e| PolicyError::SchemaParse(e.to_string()))?;
+    Ok(schema)
 }
 
 /// Checks every policy in `policies` type-checks against `schema` in
 /// [`cedar_policy::ValidationMode::Strict`] — an unknown context attribute,
 /// or one used with the wrong type, is an error here, not a silent no-op at
 /// decision time.
-fn validate_against_schema(
+pub fn validate_against_schema(
     policies: &PolicySet,
     schema: &cedar_policy::Schema,
 ) -> Result<(), PolicyError> {
@@ -164,6 +175,19 @@ fn validate_against_schema(
     }
     let messages: Vec<String> = result.validation_errors().map(|e| e.to_string()).collect();
     Err(PolicyError::Validation(messages.join("; ")))
+}
+
+/// Parses `policy_src` and, if `schema_src` is given, validates it against
+/// that schema — for callers that keep Cedar source as text (e.g. one
+/// column per policy version) rather than a directory of `.cedar` files.
+pub fn validate_source(policy_src: &str, schema_src: Option<&str>) -> Result<(), PolicyError> {
+    let policies =
+        PolicySet::from_str(policy_src).map_err(|e| PolicyError::Parse(e.to_string()))?;
+    if let Some(schema_src) = schema_src {
+        let schema = parse_schema_str(schema_src)?;
+        validate_against_schema(&policies, &schema)?;
+    }
+    Ok(())
 }
 
 /// Holds the live [`PolicyEngine`] and lets it be replaced — atomically,

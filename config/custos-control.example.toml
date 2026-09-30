@@ -4,3 +4,7 @@
 
 listen = "127.0.0.1:8788"
 database_url = "postgres://custos:custos@localhost/custos_control"
+
+# Also required to run (never in this file): CUSTOS_CONTROL_POLICY_SIGNING_KEY
+# in the environment — an Ed25519 signing seed, hex or base64, e.g.
+# `openssl rand -hex 32`. Signs every policy bundle on publish.

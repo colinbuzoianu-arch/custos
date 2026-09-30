@@ -115,12 +115,13 @@ Each session = one branch/commit, `/check` green, `/security-review` before comm
   (gateway enrolment/sync), not testable yet.
 
 ### Session 11 — policies API
-- [ ] Policy sets stored with versions (text, author, message, created_at). Validate with Cedar
+- [x] Policy sets stored with versions (text, author, message, created_at). Validate with Cedar
       + schema on save; invalid versions can be saved as drafts but never published.
-- [ ] Publish = create a **policy bundle**: policies + schema + agent list (token hashes /
+- [x] Publish = create a **policy bundle**: policies + schema + agent list (token hashes /
       public keys) + version, signed with Control's Ed25519 key.
-- [ ] Diff between two versions (API returns a text diff).
-- Tests: invalid policy can't be published; bundle signature verifies; tampered bundle fails.
+- [x] Diff between two versions (API returns a text diff).
+- Tests: invalid policy can't be published ✓; bundle signature verifies ✓; tampered bundle
+  fails ✓ (see `docs/decisions/0003-policy-bundle.md`).
 
 ### Session 12 — gateway enrolment and sync
 - [ ] `custos enroll --control <url> --token <one-time enrolment token>`: gateway gets an id and

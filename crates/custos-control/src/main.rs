@@ -9,6 +9,11 @@ use std::sync::Arc;
 /// CUSTOS_AUDIT_KEY / CUSTOS_SIGNING_KEY in the gateway.
 const ADMIN_PASSWORD_ENV: &str = "CUSTOS_CONTROL_ADMIN_PASSWORD";
 
+/// Env var holding the raw Ed25519 signing seed Control uses to sign policy
+/// bundles on publish, hex- or base64-encoded. Never held in config, never
+/// logged — same convention as the gateway's `CUSTOS_SIGNING_KEY`.
+const POLICY_SIGNING_KEY_ENV: &str = "CUSTOS_CONTROL_POLICY_SIGNING_KEY";
+
 #[derive(Parser)]
 #[command(name = "custos-control", version, about = "Custos Control")]
 struct Cli {
@@ -52,9 +57,13 @@ async fn main() -> anyhow::Result<()> {
             let cfg = Config::load(&config)?;
             let db = connect(&cfg.database_url).await?;
             migrate(&db).await?;
+            let signing_key_raw = std::env::var(POLICY_SIGNING_KEY_ENV)
+                .map_err(|_| anyhow::anyhow!("{POLICY_SIGNING_KEY_ENV} is not set"))?;
+            let signing_key_bytes = custos_tokens::decode_key_32(&signing_key_raw)?;
             let state = Arc::new(AppState {
                 db,
                 login_attempts: Default::default(),
+                policy_signing_key: ed25519_dalek::SigningKey::from_bytes(&signing_key_bytes),
             });
             let listener = tokio::net::TcpListener::bind(cfg.listen).await?;
             tracing::info!(listen = %cfg.listen, "custos-control started");

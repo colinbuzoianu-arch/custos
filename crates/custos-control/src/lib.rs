@@ -8,11 +8,12 @@
 
 pub mod agents;
 pub mod config;
+pub mod policies;
 pub mod sessions;
 pub mod users;
 
 use agents::{AgentPatch, AgentsError, Status};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::{
@@ -20,6 +21,8 @@ use axum::{
     routing::{get, post},
 };
 use axum_extra::extract::cookie::CookieJar;
+use ed25519_dalek::SigningKey;
+use policies::PoliciesError;
 use serde::Deserialize;
 use sessions::{AdminUser, CurrentUser, LoginError, RateLimiter};
 use sqlx::postgres::{PgPool, PgPoolOptions};
@@ -29,6 +32,9 @@ use uuid::Uuid;
 pub struct AppState {
     pub db: PgPool,
     pub login_attempts: RateLimiter,
+    /// Signs every policy bundle on publish. See
+    /// `docs/decisions/0003-policy-bundle.md`.
+    pub policy_signing_key: SigningKey,
 }
 
 /// Connects to Postgres, failing fast if it's unreachable rather than
@@ -63,6 +69,16 @@ pub fn app(state: Arc<AppState>) -> Router {
                 .delete(delete_agent_handler),
         )
         .route("/agents/{id}/token", post(issue_token_handler))
+        .route(
+            "/policies",
+            post(save_policy_draft_handler).get(list_policy_versions_handler),
+        )
+        .route("/policies/diff", get(diff_policy_versions_handler))
+        .route("/policies/{version}", get(get_policy_version_handler))
+        .route(
+            "/policies/{version}/publish",
+            post(publish_policy_version_handler),
+        )
         .with_state(state)
 }
 
@@ -325,6 +341,145 @@ async fn issue_token_handler(
     }
 }
 
+fn policies_error_response(e: PoliciesError) -> axum::response::Response {
+    match e {
+        PoliciesError::NotFound => StatusCode::NOT_FOUND.into_response(),
+        PoliciesError::Invalid(reason) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": reason })),
+        )
+            .into_response(),
+        PoliciesError::Db(e) => {
+            tracing::error!(error = %e, "policies db error");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        PoliciesError::Serialize(e) => {
+            tracing::error!(error = %e, "failed to serialize policy bundle");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        PoliciesError::MalformedBundle(_) | PoliciesError::BadSignature => {
+            // Only reachable via `verify_bundle`, which this crate's own
+            // handlers never call on a bundle they just produced themselves.
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SavePolicyDraftRequest {
+    policy_text: String,
+    schema_text: Option<String>,
+    message: Option<String>,
+}
+
+async fn save_policy_draft_handler(
+    State(state): State<Arc<AppState>>,
+    AdminUser(user): AdminUser,
+    headers: HeaderMap,
+    Json(req): Json<SavePolicyDraftRequest>,
+) -> impl IntoResponse {
+    if let Err(status) = user.check_csrf(&headers) {
+        return status.into_response();
+    }
+    match policies::save_draft(
+        &state.db,
+        user.tenant_id,
+        user.user_id,
+        &req.policy_text,
+        req.schema_text.as_deref(),
+        req.message.as_deref(),
+    )
+    .await
+    {
+        Ok(version) => {
+            agents::record_admin_audit(
+                &state.db,
+                user.tenant_id,
+                user.user_id,
+                "save_draft",
+                "policy_version",
+                Some(version.id),
+                None,
+            )
+            .await;
+            (StatusCode::CREATED, Json(version)).into_response()
+        }
+        Err(e) => policies_error_response(e),
+    }
+}
+
+async fn list_policy_versions_handler(
+    State(state): State<Arc<AppState>>,
+    AdminUser(user): AdminUser,
+) -> impl IntoResponse {
+    match policies::list_versions(&state.db, user.tenant_id).await {
+        Ok(list) => Json(list).into_response(),
+        Err(e) => policies_error_response(e),
+    }
+}
+
+async fn get_policy_version_handler(
+    State(state): State<Arc<AppState>>,
+    AdminUser(user): AdminUser,
+    Path(version): Path<i32>,
+) -> impl IntoResponse {
+    match policies::get_version(&state.db, user.tenant_id, version).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => policies_error_response(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct DiffQuery {
+    from: i32,
+    to: i32,
+}
+
+async fn diff_policy_versions_handler(
+    State(state): State<Arc<AppState>>,
+    AdminUser(user): AdminUser,
+    Query(q): Query<DiffQuery>,
+) -> impl IntoResponse {
+    match policies::diff_versions(&state.db, user.tenant_id, q.from, q.to).await {
+        Ok(diff) => diff.into_response(),
+        Err(e) => policies_error_response(e),
+    }
+}
+
+async fn publish_policy_version_handler(
+    State(state): State<Arc<AppState>>,
+    AdminUser(user): AdminUser,
+    headers: HeaderMap,
+    Path(version): Path<i32>,
+) -> impl IntoResponse {
+    if let Err(status) = user.check_csrf(&headers) {
+        return status.into_response();
+    }
+    match policies::publish(
+        &state.db,
+        user.tenant_id,
+        version,
+        &state.policy_signing_key,
+    )
+    .await
+    {
+        Ok((updated, signed)) => {
+            agents::record_admin_audit(
+                &state.db,
+                user.tenant_id,
+                user.user_id,
+                "publish",
+                "policy_version",
+                Some(updated.id),
+                None,
+            )
+            .await;
+            Json(signed).into_response()
+        }
+        Err(e) => policies_error_response(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,6 +501,7 @@ mod tests {
         Arc::new(AppState {
             db,
             login_attempts: Default::default(),
+            policy_signing_key: SigningKey::from_bytes(&[1u8; 32]),
         })
     }
 
