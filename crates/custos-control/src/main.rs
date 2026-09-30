@@ -52,7 +52,10 @@ async fn main() -> anyhow::Result<()> {
             let cfg = Config::load(&config)?;
             let db = connect(&cfg.database_url).await?;
             migrate(&db).await?;
-            let state = Arc::new(AppState { db });
+            let state = Arc::new(AppState {
+                db,
+                login_attempts: Default::default(),
+            });
             let listener = tokio::net::TcpListener::bind(cfg.listen).await?;
             tracing::info!(listen = %cfg.listen, "custos-control started");
             axum::serve(listener, app(state)).await?;

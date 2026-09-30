@@ -99,11 +99,11 @@ Each session = one branch/commit, `/check` green, `/security-review` before comm
   mockups if present. Languages EN/DE/RO from the start (i18n keys, no hard-coded strings).
 
 ### Session 9 — Control skeleton and login
-- [ ] ADR 0002. Crate `custos-control`, sqlx migrations, `docker-compose.control.yml`
+- [x] ADR 0002. Crate `custos-control`, sqlx migrations, `docker-compose.control.yml`
       (control + postgres), `/healthz`.
-- [ ] Users: email + password (argon2id), roles `admin` / `approver` / `viewer`.
+- [x] Users: email + password (argon2id), roles `admin` / `approver` / `viewer`.
       `custos-control create-admin` CLI for the first user.
-- [ ] Sessions: server-side, HttpOnly + Secure + SameSite=Strict cookies, CSRF protection,
+- [x] Sessions: server-side, HttpOnly + Secure + SameSite=Strict cookies, CSRF protection,
       login rate limiting, audit of logins.
 - Tests: login ok/fail, lockout after N failures, viewer can't call admin endpoints.
 
