@@ -36,9 +36,13 @@ pub enum Decision {
     Block {
         reason: String,
     },
-    /// Wait for a human. Not enforced yet (week 2).
+    /// Wait for a human approver (session 16).
     Hold {
         reason: String,
+        /// Set when the deciding policy also carries `@four_eyes` — Custos
+        /// Control then refuses to let the agent's own owner approve it.
+        #[serde(default)]
+        four_eyes: bool,
     },
 }
 

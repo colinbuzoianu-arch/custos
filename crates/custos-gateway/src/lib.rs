@@ -499,7 +499,7 @@ async fn check_tool_call(state: &Arc<AppState>, agent: &AgentId, msg: &Value) ->
     tracing::info!(agent = %agent, tool, decision = ?decision, "tool call");
     match decision {
         Decision::Allow => None,
-        Decision::Block { reason } | Decision::Hold { reason } => Some(rpc_error(
+        Decision::Block { reason } | Decision::Hold { reason, .. } => Some(rpc_error(
             id,
             BLOCKED_CODE,
             &format!("Blocked by Custos: {reason}"),

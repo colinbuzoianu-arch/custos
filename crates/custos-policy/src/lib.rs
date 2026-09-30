@@ -101,7 +101,7 @@ impl PolicyEngine {
             .collect();
 
         Ok(match response.decision() {
-            CedarDecision::Allow => Decision::Allow,
+            CedarDecision::Allow => self.allow_or_hold(&response),
             CedarDecision::Deny if ids.is_empty() => Decision::Block {
                 reason: "no policy permits this call".into(),
             },
@@ -109,6 +109,32 @@ impl PolicyEngine {
                 reason: format!("forbidden by {}", ids.join(", ")),
             },
         })
+    }
+
+    /// Cedar granted the call, but the permit(s) that granted it may carry
+    /// `@hold("reason")` — turning it into a wait-for-a-human decision
+    /// instead — and/or `@four_eyes` (any value, or none: presence is
+    /// enough), which Control uses to refuse letting the agent's own owner
+    /// be the one who approves it.
+    fn allow_or_hold(&self, response: &cedar_policy::Response) -> Decision {
+        let hold_reasons: Vec<String> = response
+            .diagnostics()
+            .reason()
+            .filter_map(|pid| self.policies.policy(pid)?.annotation("hold"))
+            .map(str::to_string)
+            .collect();
+        if hold_reasons.is_empty() {
+            return Decision::Allow;
+        }
+        let four_eyes = response.diagnostics().reason().any(|pid| {
+            self.policies
+                .policy(pid)
+                .is_some_and(|p| p.annotation("four_eyes").is_some())
+        });
+        Decision::Hold {
+            reason: hold_reasons.join("; "),
+            four_eyes,
+        }
     }
 }
 
@@ -517,6 +543,61 @@ mod tests {
             &no_findings(),
         );
         assert!(!d.is_allowed());
+    }
+
+    #[test]
+    fn a_hold_annotated_permit_returns_hold_not_allow() {
+        let policy = r#"
+            @id("large-payment-needs-approval")
+            @hold("payments over policy require a human")
+            permit (
+                principal,
+                action,
+                resource == Tool::"sap.create_payment_proposal"
+            );
+        "#;
+        let engine = match PolicyEngine::parse(policy) {
+            Ok(e) => e,
+            Err(e) => panic!("{e}"),
+        };
+        let decision = engine.decide(
+            &call("invoice-processor", "sap.create_payment_proposal"),
+            &no_findings(),
+        );
+        match decision {
+            Decision::Hold { reason, four_eyes } => {
+                assert!(reason.contains("require a human"), "{reason}");
+                assert!(!four_eyes);
+            }
+            other => panic!("expected Hold, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn four_eyes_is_carried_when_the_permit_has_that_annotation() {
+        let policy = r#"
+            @hold("needs a second pair of eyes")
+            @four_eyes
+            permit (principal, action, resource == Tool::"payroll.run");
+        "#;
+        let engine = match PolicyEngine::parse(policy) {
+            Ok(e) => e,
+            Err(e) => panic!("{e}"),
+        };
+        let decision = engine.decide(&call("x", "payroll.run"), &no_findings());
+        match decision {
+            Decision::Hold { four_eyes, .. } => assert!(four_eyes),
+            other => panic!("expected Hold, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_permit_without_hold_still_just_allows() {
+        let decision = engine().decide(
+            &call("invoice-processor", "sap.read_invoice"),
+            &no_findings(),
+        );
+        assert_eq!(decision, Decision::Allow);
     }
 
     #[test]
