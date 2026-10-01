@@ -26,6 +26,7 @@ cargo fmt --all
 cargo run -p custos-gateway -- run --config config/custos.toml
 cargo run -p custos-gateway -- hash-token <token>
 cargo run -p custos-gateway -- verify-audit data/audit.jsonl
+cargo audit                                          # dependency vulnerabilities (needs `cargo install cargo-audit --locked`; see .cargo/audit.toml for documented exceptions)
 ```
 
 A task is done only when all three of test, clippy and fmt pass.

@@ -1,0 +1,36 @@
+# cargo-audit configuration. Run with `cargo audit` (install once via
+# `cargo install cargo-audit --locked`). See CLAUDE.md's "Commands" section
+# and docs/PLAN.md session 18 for when this is run as part of a release
+# pass.
+#
+# Every entry below is a deliberate, documented risk acceptance, not an
+# oversight — re-evaluate each one if the crate it's about ever changes in
+# a way that could make it reachable.
+
+[advisories]
+ignore = [
+    # lopdf (pulled in by printpdf <- genpdf, used for evidence-pack PDFs,
+    # session 17): stack overflow via deeply nested PDF *objects* while
+    # *parsing* an untrusted PDF. This codebase only ever uses lopdf to
+    # *write* a PDF object graph that printpdf itself constructs from our
+    # own trusted data (crates/custos-control/src/evidence/pdf.rs) - no
+    # untrusted PDF is ever parsed, and the `images` feature (the one path
+    # that could plausibly read external files) isn't enabled. printpdf
+    # 0.3.x pins lopdf = "0.26", so this can't be fixed by bumping our own
+    # dependency version without dropping genpdf for a rewrite against
+    # printpdf's newer, differently-shaped 0.12.x API - not done here.
+    # Revisit if genpdf/printpdf ever gain a path that parses external PDF
+    # input, or if genpdf moves to a printpdf version with a fixed lopdf.
+    "RUSTSEC-2026-0187",
+
+    # rsa (via sqlx-mysql's auth plugin support): not actually reachable -
+    # `cargo tree -i rsa` and `cargo tree -i sqlx-mysql` both report zero
+    # dependents. Our sqlx dependency explicitly disables default features
+    # and only enables "postgres" (never "mysql"); this is a stale
+    # Cargo.lock entry, not a real compiled dependency. No fixed version
+    # exists upstream regardless. A `cargo update` pass to prune unused
+    # lockfile entries would remove this cleanly but wasn't done in this
+    # pass to avoid touching other pinned versions right before a release
+    # tag without time to retest.
+    "RUSTSEC-2023-0071",
+]
