@@ -197,10 +197,16 @@ Each session = one branch/commit, `/check` green, `/security-review` before comm
 - No dashboard page yet for triggering an export — API only, see the ADR.
 
 ### Session 18 — release
-- [ ] End-to-end demo in docker compose: MCP server + gateway + Control + Postgres + seeded
-      demo data. Update docs/DEMO.md.
-- [ ] Security pass: `/security-review` on the whole control crate, `cargo audit`, `npm audit`.
-- [ ] Tag `v0.3.0` — first version with the interface.
+- [x] End-to-end demo in docker compose: MCP server + gateway + Control + Postgres + seeded
+      demo data (docker-compose.full.yml overlay + scripts/seed-demo.sh). Updated docs/DEMO.md.
+      **Not run against a live Docker daemon** in the environment it was written in — please
+      try it and report what breaks.
+- [x] Security pass: manual review against CLAUDE.md's eight invariants (no `/security-review`
+      diff to run — see the two fixes it produced: four-eyes fail-closed, and synced agent
+      tokens actually working), `cargo audit` (one high-severity finding, documented as not
+      reachable in `.cargo/audit.toml` rather than silently ignored), `npm audit` (clean).
+- [ ] Tag `v0.3.0` — first version with the interface. Not tagged yet — say when you want it
+      tagged (and whether to push it).
 
 ## Later
 - [ ] OIDC login (Microsoft Entra ID, Google) for the dashboard

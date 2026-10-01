@@ -21,6 +21,10 @@ Runs Custos in front of the MCP reference "everything" server, on
 [docs/DEMO.md](docs/DEMO.md) for what to try once it's up, and how to check
 the audit log.
 
+For the gateway *and* Custos Control together (agents, policies, and
+approvals managed through Control, synced to a live gateway), see
+["Full stack" in docs/DEMO.md](docs/DEMO.md#full-stack-gateway--control).
+
 ### cargo
 
 ```bash

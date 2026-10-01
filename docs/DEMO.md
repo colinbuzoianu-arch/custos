@@ -28,6 +28,72 @@ signing key needed) rather than the config you'd hand-build below — see that
 file's comments, and `config/custos.example.toml`, for the production
 `"hash"` mode.
 
+## Full stack: gateway + Control
+
+This runs the gateway *and* Custos Control together: an agent and a policy
+created through Control's API, a gateway that enrolls with Control and
+syncs both down automatically (not a static config file), and the gateway
+shipping its audit log back to Control.
+
+Prerequisites: Docker with Compose, `curl`, and [`jq`](https://jqlang.org/)
+(the seed script parses JSON responses with it — `apt install jq` /
+`brew install jq` / `choco install jq`, or on Windows without Chocolatey,
+`winget install jqlang.jq`).
+
+```bash
+cp .env.example .env
+export CUSTOS_CONTROL_POLICY_SIGNING_KEY=$(openssl rand -hex 32)
+
+docker compose -f docker-compose.yml -f docker-compose.control.yml -f docker-compose.full.yml \
+  up -d everything postgres control
+
+./scripts/seed-demo.sh
+```
+
+The seed script (`scripts/seed-demo.sh`) creates a Control admin, logs in,
+creates an agent and issues its token, saves and publishes a policy
+granting that agent `echo`/`get-sum` (same two tools as the plain demo),
+creates a one-time gateway enrollment token, runs `custos enroll` inside a
+throwaway container using it, and finally starts the real gateway — all
+against the same Postgres-backed Control instance, reachable at
+`http://127.0.0.1:8788`. It prints the agent's token at the end (shown
+once, same guarantee as the dashboard's "issue token" button).
+
+Give the gateway a few seconds (it polls Control every 5s —
+`config/custos.full.toml`) to complete its first sync, then drive it
+exactly like the plain demo's [step 4](#4-terminal-3--drive-it-as-the-agent),
+using the printed token, agent name `invoice-processor`, and the same
+`http://127.0.0.1:8787/mcp` base URL. `docker compose -f docker-compose.yml
+-f docker-compose.control.yml -f docker-compose.full.yml logs -f custos`
+shows the sync happening and each decision as it's made.
+
+What this demonstrates that the plain Docker demo doesn't:
+
+- **The agent's token came from Control**, not a hash hand-computed and
+  pasted into a config file — this gateway has no `[[agents]]` of its own
+  at all (`config/custos.full.toml`).
+- **The policy came from Control**, published through its API, not a
+  `.cedar` file baked into the image or bind-mounted from the repo.
+- **The audit log round-trips**: every decision the gateway makes is
+  shipped to Control and searchable there (`GET /api/audit` once you're
+  logged in — no dashboard page serves this yet, see
+  `docs/decisions/0006-dashboard.md`'s open item on embedding it).
+
+To look at Control's own data directly (agents, policies, audit, pending
+approvals) without the dashboard, use its API with the same cookie jar the
+seed script builds, or log in fresh with the admin credentials the script
+used (`admin@demo.test` / `correct-horse-battery-staple` — demo-only,
+same caveat as the plain demo's token).
+
+**This hasn't been run against a live Docker daemon in the environment it
+was written in** (no Docker available there, the same limitation as the
+Postgres-backed tests throughout this project) — if a step fails, please
+say what broke so it can be fixed.
+
+`docker compose -f docker-compose.yml -f docker-compose.control.yml -f docker-compose.full.yml down -v`
+tears down everything including both named volumes (gateway state and the
+Postgres database).
+
 ## cargo run, three terminals
 
 This walks the same scenario by hand: Node.js (for `npx`) and Rust

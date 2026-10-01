@@ -1,0 +1,5 @@
+# core.autocrlf=true (common on Windows, including this repo's dev setup)
+# would otherwise check shell scripts out with CRLF line endings, which
+# breaks their shebang line and can break anything using a heredoc. Force
+# LF for anything actually executed as a script.
+*.sh text eol=lf

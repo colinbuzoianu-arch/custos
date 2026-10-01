@@ -1,0 +1,30 @@
+# Used by docker-compose.full.yml (the gateway + Control + dashboard
+# end-to-end demo) — bind-mounted read-only into the container at
+# /etc/custos/custos.toml. Unlike config/custos.docker.toml, this gateway
+# has no [[agents]] of its own at all: every agent it trusts comes from
+# Control via [control] sync, to actually demonstrate that path working
+# (docs/decisions/0010-synced-agent-tokens.md). See docs/DEMO.md.
+
+listen = "0.0.0.0:8787"
+upstream = "http://everything:3001/mcp"
+
+# Unlike config/custos.docker.toml's policy_dir, this one is NOT the
+# repo's own ./policies (which is read-only and already has its own
+# demo/finance/inspect policies) — it's an empty, writable volume, because
+# this gateway's whole policy set comes from what Control publishes and
+# syncs down. Mixing a read-only hand-authored directory with a synced
+# bundle would concatenate both (see docs/decisions/0004-gateway-sync.md's
+# "policy_dir should hold only the synced bundle" caveat) - keeping them
+# separate avoids that entirely for this demo.
+policy_dir = "/var/lib/custos/policy"
+audit_log = "/var/lib/custos/audit.jsonl"
+audit_arguments = "redacted"
+
+[control]
+url = "http://control:8788"
+state_path = "/var/lib/custos/control-state.json"
+# Short intervals so the demo doesn't sit around waiting - fine for a demo,
+# too chatty for a real deployment (config/custos.example.toml's defaults).
+poll_interval_secs = 5
+approval_timeout_secs = 60
+approval_poll_interval_secs = 2

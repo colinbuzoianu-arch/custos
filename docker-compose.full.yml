@@ -1,0 +1,21 @@
+# The end-to-end demo: everything (MCP) + custos (gateway) + postgres +
+# control, all on one compose project so they can reach each other by
+# service name. This file is an *overlay* — it only redefines what needs to
+# change on top of the other two; run all three together:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.control.yml -f docker-compose.full.yml up -d
+#
+# See docs/DEMO.md for the full walkthrough, including seeding Control with
+# an admin, an agent, and a published policy, and enrolling this gateway.
+services:
+  custos:
+    # Replaces (not merges with) the base file's volumes: no read-only
+    # ./policies mount here — this gateway's whole policy set comes from
+    # what Control syncs down (config/custos.full.toml), not from files
+    # baked into the image or bind-mounted from the repo.
+    volumes:
+      - ./config/custos.full.toml:/etc/custos/custos.toml:ro
+      - custos-data:/var/lib/custos
+    depends_on:
+      - everything
+      - control
