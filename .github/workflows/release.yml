@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
   packages: write
+  # actions/download-artifact@v4 (the `release` job, below) needs this to
+  # list and fetch artifacts via the Actions API - declaring `permissions:`
+  # at all sets every unlisted scope to `none` rather than a default, so
+  # this has to be explicit.
+  actions: read
 
 jobs:
   build:
